@@ -11,6 +11,12 @@ namespace TicaTourShared.Data
         }
         public DbSet<CompanyUser> CompanyUsers => Set<CompanyUser>();
         public DbSet<CustomerUser> CustomerUsers => Set<CustomerUser>();
+        public DbSet<Tour> Tours => Set<Tour>();
+        public DbSet<Booking> Bookings => Set<Booking>();
+        public DbSet<Review> Reviews => Set<Review>();
+        public DbSet<Promotion> Promotions => Set<Promotion>();
+        public DbSet<Payment> Payments => Set<Payment>();
+        public DbSet<Bill> Bills => Set<Bill>();
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
