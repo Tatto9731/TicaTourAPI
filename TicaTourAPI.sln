@@ -1,0 +1,43 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36414.22 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TicaTourCompany", "TicaTourAPI\TicaTourCompany.csproj", "{E8CEFE10-A257-473F-AB0B-73BD7D570BA5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TicaTourShared.Data", "TicaTourShared.Data\TicaTourShared.Data.csproj", "{E56A238E-ABFE-4A25-8471-7DEC7ED72184}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TicaTourShared.Models", "TicaTourShared.Models\TicaTourShared.Models.csproj", "{F1048FDE-CAC5-4BBA-81F0-2C06D16F6ED4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TicaTourClient", "TicaTourClient\TicaTourClient.csproj", "{286C65D8-F8D3-4D46-8111-2C3012FE5EA9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E8CEFE10-A257-473F-AB0B-73BD7D570BA5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E8CEFE10-A257-473F-AB0B-73BD7D570BA5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E8CEFE10-A257-473F-AB0B-73BD7D570BA5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E8CEFE10-A257-473F-AB0B-73BD7D570BA5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E56A238E-ABFE-4A25-8471-7DEC7ED72184}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E56A238E-ABFE-4A25-8471-7DEC7ED72184}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E56A238E-ABFE-4A25-8471-7DEC7ED72184}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E56A238E-ABFE-4A25-8471-7DEC7ED72184}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F1048FDE-CAC5-4BBA-81F0-2C06D16F6ED4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F1048FDE-CAC5-4BBA-81F0-2C06D16F6ED4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F1048FDE-CAC5-4BBA-81F0-2C06D16F6ED4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F1048FDE-CAC5-4BBA-81F0-2C06D16F6ED4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{286C65D8-F8D3-4D46-8111-2C3012FE5EA9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{286C65D8-F8D3-4D46-8111-2C3012FE5EA9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{286C65D8-F8D3-4D46-8111-2C3012FE5EA9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{286C65D8-F8D3-4D46-8111-2C3012FE5EA9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {94524767-B043-4A1A-8B22-440D9DB9C65B}
+	EndGlobalSection
+EndGlobal
