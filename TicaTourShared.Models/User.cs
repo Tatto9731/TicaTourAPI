@@ -8,6 +8,7 @@ namespace TicaTourShared.Data
 {
     public class User : IdentityUser
     {
+        public UserType UserType { get; set; }
         public CompanyUser? CompanyUser { get; set; }
         public CustomerUser? CustomerUser { get; set; }
     }
@@ -16,15 +17,16 @@ namespace TicaTourShared.Data
     {
         // PK = FK a AspNetUsers(Id)
         [Key]
-        public string UserId { get; set; } = default!;
-        public User User { get; set; } = default!;
+        public string UserId { get; set; }
+        public User User { get; set; }
 
+        [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
         public int CompanyId { get; set; }
-        public string Name { get; set; } = default!;
-        public string Address { get; set; } = default!;
-        public string Description { get; set; } = default!;
-        public string ImageUrl { get; set; } = default!;
-        public string PhoneNumber { get; set; } = default!;
+        public string Name { get; set; }
+        public string Address { get; set; }
+        public string Description { get; set; }
+        public string ImageUrl { get; set; }
+        public string PhoneNumber { get; set; }
 
         //Navigation properties
         // Tours
@@ -34,13 +36,16 @@ namespace TicaTourShared.Data
     public class CustomerUser
     {
         [Key]
-        public string UserId { get; set; } = default!;
-        public User User { get; set; } = default!;
+        public string UserId { get; set; }
+        public User User { get; set; }
 
+        [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
         public int CustomerId { get; set; }
-        public string Name { get; set; } = default!;
-        public string PhoneNumber { get; set; } = default!;
-        public string IdNumber { get; set; } = default!;
+        public string Name { get; set; }
+        public string Email { get; set; }
+        public string PhoneNumber { get; set; }
+        public string IdNumber { get; set; }
+        public List<Preferences> Preferences { get; set; }
 
         //Navigation properties
         //Bookings

@@ -1,55 +1,96 @@
-using Microsoft.EntityFrameworkCore;
+using System.Text;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Logging;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using TicaTourShared.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// Diagnóstico detallado de identidad (mientas depuras)
+IdentityModelEventSource.ShowPII = true;
 
-// FIX: registrar TimeProvider para Identity en .NET 8
+// Necesario para Identity (.NET 8)
 builder.Services.AddSingleton(TimeProvider.System);
 
-// 1) Registras el DbContext apuntando a la misma BD
+// DbContext
 var cs = builder.Configuration.GetConnectionString("DefaultConnection");
-
-// PostgreSQL:
 builder.Services.AddDbContext<ApplicationDbContext>(opt =>
-    opt.UseNpgsql(cs
-    // IMPORTANTE: si centralizaste migraciones en otro proyecto (p.ej. "TicaTour.Data")
-    // descomenta y pon el nombre del ensamblado de migraciones:
-    , b => b.MigrationsAssembly("TicaTourShared.Data")
-    )
-);
+    opt.UseNpgsql(cs, b => b.MigrationsAssembly("TicaTourShared.Data")));
 
-// 2) Registras Identity usando TU ApplicationUser y ese DbContext
-builder.Services
-    .AddIdentityCore<User>(opt =>
+// Identity
+builder.Services.AddIdentityCore<User>(opt =>
+{
+    opt.Password.RequiredLength = 6;
+    opt.Password.RequireDigit = false;
+    opt.Password.RequireNonAlphanumeric = false;
+    opt.Password.RequireUppercase = false;
+})
+.AddRoles<IdentityRole>()
+.AddEntityFrameworkStores<ApplicationDbContext>()
+.AddSignInManager();
+
+// Controllers
+builder.Services.AddControllers()
+    .AddJsonOptions(o => o.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles);
+
+// JWT
+var jwtSection = builder.Configuration.GetSection("Jwt");
+var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSection["Key"]!));
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.RequireHttpsMetadata = false; // en prod: true con HTTPS
+    options.TokenValidationParameters = new TokenValidationParameters
     {
-        opt.Password.RequiredLength = 6;
-        opt.Password.RequireDigit = false;
-        opt.Password.RequireNonAlphanumeric = false;
-        opt.Password.RequireUppercase = false;
-    })
-    .AddRoles<IdentityRole>()
-    .AddEntityFrameworkStores<ApplicationDbContext>()
-    .AddSignInManager();
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSection["Issuer"],
+        ValidAudience = jwtSection["Audience"],
+        IssuerSigningKey = key,
+        ClockSkew = TimeSpan.Zero
+    };
+});
 
+builder.Services.AddAuthorization();
 builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+
+// Swagger
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    var scheme = new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Description = "JWT Bearer token",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+    };
+    c.AddSecurityDefinition("Bearer", scheme);
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement { { scheme, Array.Empty<string>() } });
+});
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseHttpsRedirection();
 
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

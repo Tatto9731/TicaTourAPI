@@ -8,11 +8,10 @@ namespace TicaTourShared
 {
     public class Enums
     {
-        public enum UserRole
+        public enum UserType
         {
             Company = 1,
-            Customer = 2,
-            Admin = 3
+            Customer = 2
         }
         public enum Rating
         {
@@ -41,6 +40,14 @@ namespace TicaTourShared
             Pending = 2,
             Failed = 3
         }
-
+        public enum Preferences
+        {
+            Adventure = 1,
+            Cultural = 2,
+            Historical = 3,
+            Nature = 4,
+            Relaxation = 5,
+            Wildlife = 6
+        }
     }
 }
