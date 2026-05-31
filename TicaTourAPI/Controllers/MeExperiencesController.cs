@@ -452,7 +452,7 @@ public class MeExperiencesController : ControllerBase
         }
     }
 
-    private sealed class ExperienceListRow
+    private class ExperienceListRow
     {
         public string PublicCode { get; set; } = string.Empty;
         public string Slug { get; set; } = string.Empty;
