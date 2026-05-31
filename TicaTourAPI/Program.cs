@@ -3,6 +3,7 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using Npgsql;
 using System.Security.Claims;
+using TicaTourAPI.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -31,19 +32,6 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 
-// PostgreSQL / Supabase connection
-builder.Services.AddScoped<NpgsqlConnection>(_ =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("SupabaseDb");
-
-    if (string.IsNullOrWhiteSpace(connectionString))
-    {
-        throw new InvalidOperationException("The SupabaseDb connection string is missing.");
-    }
-
-    return new NpgsqlConnection(connectionString);
-});
-
 // Supabase JWT authentication
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -67,6 +55,7 @@ builder.Services
 builder.Services.AddAuthorization();
 
 builder.Services.AddHttpClient();
+builder.Services.AddScoped<IDbConnectionFactory, NpgsqlConnectionFactory>();
 
 var app = builder.Build();
 
