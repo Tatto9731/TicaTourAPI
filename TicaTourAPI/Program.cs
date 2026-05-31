@@ -66,6 +66,8 @@ builder.Services
 
 builder.Services.AddAuthorization();
 
+builder.Services.AddHttpClient();
+
 var app = builder.Build();
 
 // Swagger middleware
