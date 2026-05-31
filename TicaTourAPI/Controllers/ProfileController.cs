@@ -124,11 +124,11 @@ namespace TicaTourAPI.Controllers;
 [Route("api/[controller]")]
 public class ProfileController : ControllerBase
 {
-    private readonly NpgsqlConnection _connection;
+    private readonly IConfiguration _configuration;
 
-    public ProfileController(NpgsqlConnection connection)
+    public ProfileController(IConfiguration configuration)
     {
-        _connection = connection;
+        _configuration = configuration;
     }
 
     [HttpGet("me")]
@@ -149,9 +149,25 @@ public class ProfileController : ControllerBase
         }
 
         var email = GetEmailFromToken();
+        var connectionString = _configuration.GetConnectionString("SupabaseDb");
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "CONNECTION_STRING_MISSING",
+                    message = "SupabaseDb connection string is missing."
+                }
+            });
+        }
 
         try
         {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+
             const string profileSql = """
                 select
                     id,
@@ -171,7 +187,7 @@ public class ProfileController : ControllerBase
                 limit 1;
             """;
 
-            var profile = await _connection.QueryFirstOrDefaultAsync(profileSql, new
+            var profile = await connection.QueryFirstOrDefaultAsync(profileSql, new
             {
                 UserId = userId.Value
             });
@@ -187,34 +203,6 @@ public class ProfileController : ControllerBase
                     }
                 });
             }
-
-            const string companiesSql = """
-                select
-                    c.id,
-                    c.name,
-                    c.slug,
-                    c.description,
-                    c.province,
-                    c.zone,
-                    c.logo_url,
-                    c.cover_image_url,
-                    c.phone,
-                    c.whatsapp,
-                    c.email,
-                    c.website_url,
-                    c.is_verified,
-                    cu.role as company_role,
-                    cu.created_at
-                from public.company_users cu
-                inner join public.companies c on c.id = cu.company_id
-                where cu.user_id = @UserId
-                order by cu.created_at desc;
-            """;
-
-            var companies = await _connection.QueryAsync(companiesSql, new
-            {
-                UserId = userId.Value
-            });
 
             return Ok(new
             {
@@ -237,24 +225,7 @@ public class ProfileController : ControllerBase
                         createdAt = profile.created_at,
                         updatedAt = profile.updated_at
                     },
-                    companies = companies.Select(c => new
-                    {
-                        id = (Guid)c.id,
-                        name = (string)c.name,
-                        slug = (string)c.slug,
-                        description = (string?)c.description,
-                        province = (string?)c.province,
-                        zone = (string?)c.zone,
-                        logoUrl = (string?)c.logo_url,
-                        coverImageUrl = (string?)c.cover_image_url,
-                        phone = (string?)c.phone,
-                        whatsapp = (string?)c.whatsapp,
-                        email = (string?)c.email,
-                        websiteUrl = (string?)c.website_url,
-                        isVerified = (bool)c.is_verified,
-                        companyRole = (string)c.company_role,
-                        createdAt = c.created_at
-                    })
+                    companies = Array.Empty<object>()
                 },
                 message = "OK"
             });
