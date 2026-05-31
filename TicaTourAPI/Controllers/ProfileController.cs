@@ -1,117 +1,4 @@
-﻿/*using Dapper;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Npgsql;
-using System.Security.Claims;
-
-namespace TicaTourAPI.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-public class ProfileController : ControllerBase
-{
-    private readonly NpgsqlConnection _connection;
-
-    public ProfileController(NpgsqlConnection connection)
-    {
-        _connection = connection;
-    }
-
-    [Authorize]
-    [HttpGet("me")]
-    public async Task<IActionResult> GetMyProfile()
-    {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                     ?? User.FindFirstValue("sub");
-
-        var email = User.FindFirstValue("email");
-
-        if (string.IsNullOrWhiteSpace(userId))
-        {
-            return Unauthorized(new
-            {
-                message = "User ID was not found in the token."
-            });
-        }
-
-        var userGuid = Guid.Parse(userId);
-
-        const string profileSql = """
-            select 
-                id,
-                full_name,
-                role,
-                phone,
-                avatar_url,
-                preferred_language,
-                preferred_currency,
-                dark_mode,
-                profile_completion,
-                is_identity_verified,
-                created_at,
-                updated_at
-            from public.profiles
-            where id = @UserId;
-        """;
-
-        const string companiesSql = """
-            select
-                c.id,
-                c.name,
-                c.slug,
-                c.description,
-                c.province,
-                c.zone,
-                c.logo_url,
-                c.cover_image_url,
-                c.phone,
-                c.whatsapp,
-                c.email,
-                c.website_url,
-                c.is_verified,
-                c.rating_avg,
-                c.reviews_count,
-                cu.role as company_role,
-                c.created_at,
-                c.updated_at
-            from public.company_users cu
-            inner join public.companies c on c.id = cu.company_id
-            where cu.user_id = @UserId
-            order by c.created_at desc;
-        """;
-
-        var profile = await _connection.QueryFirstOrDefaultAsync(profileSql, new
-        {
-            UserId = userGuid
-        });
-
-        if (profile is null)
-        {
-            return NotFound(new
-            {
-                message = "Profile was not found for the authenticated user."
-            });
-        }
-
-        var companies = await _connection.QueryAsync(companiesSql, new
-        {
-            UserId = userGuid
-        });
-
-        return Ok(new
-        {
-            data = new
-            {
-                userId,
-                email,
-                profile,
-                companies
-            },
-            message = "OK"
-        });
-    }
-}*/
-using Dapper;
+﻿using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
@@ -204,6 +91,34 @@ public class ProfileController : ControllerBase
                 });
             }
 
+            const string companiesSql = """
+                select
+                    c.id,
+                    c.name,
+                    c.slug,
+                    c.description,
+                    c.province,
+                    c.zone,
+                    c.logo_url,
+                    c.cover_image_url,
+                    c.phone,
+                    c.whatsapp,
+                    c.email,
+                    c.website_url,
+                    c.is_verified,
+                    cu.role as company_role,
+                    cu.created_at
+                from public.company_users cu
+                inner join public.companies c on c.id = cu.company_id
+                where cu.user_id = @UserId
+                order by cu.created_at desc;
+            """;
+
+            var companies = await connection.QueryAsync(companiesSql, new
+            {
+                UserId = userId.Value
+            });
+
             return Ok(new
             {
                 data = new
@@ -225,7 +140,24 @@ public class ProfileController : ControllerBase
                         createdAt = profile.created_at,
                         updatedAt = profile.updated_at
                     },
-                    companies = Array.Empty<object>()
+                    companies = companies.Select(c => new
+                    {
+                        id = (Guid)c.id,
+                        name = (string)c.name,
+                        slug = (string)c.slug,
+                        description = (string?)c.description,
+                        province = (string?)c.province,
+                        zone = (string?)c.zone,
+                        logoUrl = (string?)c.logo_url,
+                        coverImageUrl = (string?)c.cover_image_url,
+                        phone = (string?)c.phone,
+                        whatsapp = (string?)c.whatsapp,
+                        email = (string?)c.email,
+                        websiteUrl = (string?)c.website_url,
+                        isVerified = (bool)c.is_verified,
+                        companyRole = (string)c.company_role,
+                        createdAt = c.created_at
+                    })
                 },
                 message = "OK"
             });
