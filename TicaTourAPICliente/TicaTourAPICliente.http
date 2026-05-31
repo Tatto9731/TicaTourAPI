@@ -1,6 +1,0 @@
-@TicaTourAPICliente_HostAddress = http://localhost:5143
-
-GET {{TicaTourAPICliente_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###
