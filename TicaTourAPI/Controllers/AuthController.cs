@@ -4,6 +4,7 @@ using Npgsql;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using TicaTourAPI.Data;
 using TicaTourAPI.DTOs.Auth;
 
 namespace TicaTourAPI.Controllers;
@@ -12,16 +13,16 @@ namespace TicaTourAPI.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private readonly NpgsqlConnection _connection;
+    private readonly IDbConnectionFactory _connectionFactory;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
 
     public AuthController(
-        NpgsqlConnection connection,
+        IDbConnectionFactory connectionFactory,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration)
     {
-        _connection = connection;
+        _connectionFactory = connectionFactory;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
     }
@@ -59,85 +60,106 @@ public class AuthController : ControllerBase
             });
         }
 
-        await _connection.OpenAsync();
-
-        await using var transaction = await _connection.BeginTransactionAsync();
-
         try
         {
-            const string insertProfileSql = """
-                insert into public.profiles (
-                    id,
-                    full_name,
-                    role,
-                    phone,
-                    preferred_language,
-                    preferred_currency,
-                    profile_completion,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @Id,
-                    @FullName,
-                    'traveler',
-                    @Phone,
-                    @PreferredLanguage,
-                    @PreferredCurrency,
-                    30,
-                    now(),
-                    now()
-                );
-            """;
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
 
-            const string insertTravelerProfileSql = """
-                insert into public.traveler_profiles (
-                    user_id,
-                    travel_interests,
-                    notification_settings,
-                    search_settings,
-                    location_recommendations_enabled,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @UserId,
-                    '[]'::jsonb,
-                    '{}'::jsonb,
-                    '{}'::jsonb,
-                    false,
-                    now(),
-                    now()
-                );
-            """;
-
-            await _connection.ExecuteAsync(insertProfileSql, new
+            try
             {
-                Id = authUserResult.UserId,
-                request.FullName,
-                request.Phone,
-                request.PreferredLanguage,
-                request.PreferredCurrency
-            }, transaction);
+                const string insertProfileSql = """
+                    insert into public.profiles (
+                        id,
+                        full_name,
+                        role,
+                        phone,
+                        preferred_language,
+                        preferred_currency,
+                        profile_completion,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @Id,
+                        @FullName,
+                        'traveler',
+                        @Phone,
+                        @PreferredLanguage,
+                        @PreferredCurrency,
+                        30,
+                        now(),
+                        now()
+                    );
+                """;
 
-            await _connection.ExecuteAsync(insertTravelerProfileSql, new
+                const string insertTravelerProfileSql = """
+                    insert into public.traveler_profiles (
+                        user_id,
+                        travel_interests,
+                        notification_settings,
+                        search_settings,
+                        location_recommendations_enabled,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @UserId,
+                        '[]'::jsonb,
+                        '{}'::jsonb,
+                        '{}'::jsonb,
+                        false,
+                        now(),
+                        now()
+                    );
+                """;
+
+                await connection.ExecuteAsync(insertProfileSql, new
+                {
+                    Id = authUserResult.UserId,
+                    request.FullName,
+                    request.Phone,
+                    request.PreferredLanguage,
+                    request.PreferredCurrency
+                }, transaction);
+
+                await connection.ExecuteAsync(insertTravelerProfileSql, new
+                {
+                    UserId = authUserResult.UserId
+                }, transaction);
+
+                await transaction.CommitAsync();
+            }
+            catch (Exception ex)
             {
-                UserId = authUserResult.UserId
-            }, transaction);
+                await transaction.RollbackAsync();
+                await DeleteSupabaseAuthUserAsync(authUserResult.UserId);
 
-            await transaction.CommitAsync();
+                Console.WriteLine("REGISTER TRAVELER DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "REGISTRATION_DATABASE_ERROR",
+                        message = ex.Message
+                    }
+                });
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            await transaction.RollbackAsync();
             await DeleteSupabaseAuthUserAsync(authUserResult.UserId);
+
+            Console.WriteLine("REGISTER TRAVELER CONNECTION ERROR:");
+            Console.WriteLine(ex.ToString());
 
             return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "REGISTRATION_DATABASE_ERROR",
-                    message = "The user was created in Supabase Auth, but the profile could not be created. The auth user was rolled back."
+                    code = "REGISTRATION_CONNECTION_ERROR",
+                    message = ex.Message
                 }
             });
         }
@@ -211,20 +233,37 @@ public class AuthController : ControllerBase
             });
         }
 
-        await _connection.OpenAsync();
-
-        var slugExists = await _connection.ExecuteScalarAsync<bool>(
-            "select exists(select 1 from public.companies where slug = @Slug);",
-            new { Slug = request.CompanySlug });
-
-        if (slugExists)
+        try
         {
-            return Conflict(new
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync();
+
+            var slugExists = await connection.ExecuteScalarAsync<bool>(
+                "select exists(select 1 from public.companies where slug = @Slug);",
+                new { Slug = request.CompanySlug });
+
+            if (slugExists)
+            {
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "COMPANY_SLUG_ALREADY_EXISTS",
+                        message = "The company slug is already in use."
+                    }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("REGISTER COMPANY SLUG CHECK ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "COMPANY_SLUG_ALREADY_EXISTS",
-                    message = "The company slug is already in use."
+                    code = "COMPANY_SLUG_CHECK_ERROR",
+                    message = ex.Message
                 }
             });
         }
@@ -247,127 +286,150 @@ public class AuthController : ControllerBase
             });
         }
 
-        await using var transaction = await _connection.BeginTransactionAsync();
-
         Guid companyId;
 
         try
         {
-            const string insertProfileSql = """
-                insert into public.profiles (
-                    id,
-                    full_name,
-                    role,
-                    phone,
-                    preferred_language,
-                    preferred_currency,
-                    profile_completion,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @Id,
-                    @FullName,
-                    'company_admin',
-                    @Phone,
-                    'es',
-                    'CRC',
-                    40,
-                    now(),
-                    now()
-                );
-            """;
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
 
-            const string insertCompanySql = """
-                insert into public.companies (
-                    name,
-                    slug,
-                    description,
-                    province,
-                    zone,
-                    phone,
-                    whatsapp,
-                    email,
-                    website_url,
-                    is_verified,
-                    rating_avg,
-                    reviews_count,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @Name,
-                    @Slug,
-                    @Description,
-                    @Province,
-                    @Zone,
-                    @Phone,
-                    @Whatsapp,
-                    @Email,
-                    @WebsiteUrl,
-                    false,
-                    0,
-                    0,
-                    now(),
-                    now()
-                )
-                returning id;
-            """;
-
-            const string insertCompanyUserSql = """
-                insert into public.company_users (
-                    company_id,
-                    user_id,
-                    role,
-                    created_at
-                )
-                values (
-                    @CompanyId,
-                    @UserId,
-                    'owner',
-                    now()
-                );
-            """;
-
-            await _connection.ExecuteAsync(insertProfileSql, new
+            try
             {
-                Id = authUserResult.UserId,
-                request.FullName,
-                request.Phone
-            }, transaction);
+                const string insertProfileSql = """
+                    insert into public.profiles (
+                        id,
+                        full_name,
+                        role,
+                        phone,
+                        preferred_language,
+                        preferred_currency,
+                        profile_completion,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @Id,
+                        @FullName,
+                        'company_admin',
+                        @Phone,
+                        'es',
+                        'CRC',
+                        40,
+                        now(),
+                        now()
+                    );
+                """;
 
-            companyId = await _connection.ExecuteScalarAsync<Guid>(insertCompanySql, new
+                const string insertCompanySql = """
+                    insert into public.companies (
+                        name,
+                        slug,
+                        description,
+                        province,
+                        zone,
+                        phone,
+                        whatsapp,
+                        email,
+                        website_url,
+                        is_verified,
+                        rating_avg,
+                        reviews_count,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @Name,
+                        @Slug,
+                        @Description,
+                        @Province,
+                        @Zone,
+                        @Phone,
+                        @Whatsapp,
+                        @Email,
+                        @WebsiteUrl,
+                        false,
+                        0,
+                        0,
+                        now(),
+                        now()
+                    )
+                    returning id;
+                """;
+
+                const string insertCompanyUserSql = """
+                    insert into public.company_users (
+                        company_id,
+                        user_id,
+                        role,
+                        created_at
+                    )
+                    values (
+                        @CompanyId,
+                        @UserId,
+                        'owner',
+                        now()
+                    );
+                """;
+
+                await connection.ExecuteAsync(insertProfileSql, new
+                {
+                    Id = authUserResult.UserId,
+                    request.FullName,
+                    request.Phone
+                }, transaction);
+
+                companyId = await connection.ExecuteScalarAsync<Guid>(insertCompanySql, new
+                {
+                    Name = request.CompanyName,
+                    Slug = request.CompanySlug,
+                    Description = request.CompanyDescription,
+                    request.Province,
+                    request.Zone,
+                    Phone = request.Phone,
+                    request.Whatsapp,
+                    Email = request.CompanyEmail,
+                    request.WebsiteUrl
+                }, transaction);
+
+                await connection.ExecuteAsync(insertCompanyUserSql, new
+                {
+                    CompanyId = companyId,
+                    UserId = authUserResult.UserId
+                }, transaction);
+
+                await transaction.CommitAsync();
+            }
+            catch (Exception ex)
             {
-                Name = request.CompanyName,
-                Slug = request.CompanySlug,
-                Description = request.CompanyDescription,
-                request.Province,
-                request.Zone,
-                Phone = request.Phone,
-                request.Whatsapp,
-                Email = request.CompanyEmail,
-                request.WebsiteUrl
-            }, transaction);
+                await transaction.RollbackAsync();
+                await DeleteSupabaseAuthUserAsync(authUserResult.UserId);
 
-            await _connection.ExecuteAsync(insertCompanyUserSql, new
-            {
-                CompanyId = companyId,
-                UserId = authUserResult.UserId
-            }, transaction);
+                Console.WriteLine("REGISTER COMPANY DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
 
-            await transaction.CommitAsync();
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "REGISTRATION_DATABASE_ERROR",
+                        message = ex.Message
+                    }
+                });
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            await transaction.RollbackAsync();
             await DeleteSupabaseAuthUserAsync(authUserResult.UserId);
+
+            Console.WriteLine("REGISTER COMPANY CONNECTION ERROR:");
+            Console.WriteLine(ex.ToString());
 
             return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "REGISTRATION_DATABASE_ERROR",
-                    message = "The auth user was created, but the company profile could not be completed. The auth user was rolled back."
+                    code = "REGISTRATION_CONNECTION_ERROR",
+                    message = ex.Message
                 }
             });
         }
@@ -602,6 +664,8 @@ public class AuthController : ControllerBase
 
         if (!response.IsSuccessStatusCode)
         {
+            Console.WriteLine("LOGIN AFTER REGISTER FAILED:");
+            Console.WriteLine(responseContent);
             return LoginResult.Fail();
         }
 
