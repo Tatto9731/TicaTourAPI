@@ -199,6 +199,7 @@ using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using TicaTourAPI.Data;
@@ -220,10 +221,19 @@ public class ProfileController : ControllerBase
     [HttpGet("me")]
     public async Task<IActionResult> GetMyProfile(CancellationToken cancellationToken)
     {
+        var requestId = Guid.NewGuid().ToString("N")[..8];
+        var totalWatch = Stopwatch.StartNew();
+
+        Console.WriteLine($"[PROFILE:{requestId}] START /api/Profile/me");
+
         var userId = GetUserId();
+
+        Console.WriteLine($"[PROFILE:{requestId}] Token userId raw parsed: {(userId is null ? "NULL" : userId.Value.ToString())}");
 
         if (userId is null)
         {
+            Console.WriteLine($"[PROFILE:{requestId}] END Unauthorized - User ID not found in token. ElapsedMs={totalWatch.ElapsedMilliseconds}");
+
             return Unauthorized(new
             {
                 error = new
@@ -236,9 +246,20 @@ public class ProfileController : ControllerBase
 
         var email = GetEmailFromToken();
 
+        Console.WriteLine($"[PROFILE:{requestId}] Token email: {email ?? "NULL"}");
+
         try
         {
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 1 - Opening DB connection...");
+
+            var connectionWatch = Stopwatch.StartNew();
+
             await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+
+            connectionWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 1 OK - DB connection opened. ElapsedMs={connectionWatch.ElapsedMilliseconds}");
+            Console.WriteLine($"[PROFILE:{requestId}] DB State after open: {connection.State}");
 
             const string sql = """
                 select
@@ -298,16 +319,28 @@ public class ProfileController : ControllerBase
                 limit 1;
             """;
 
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 2 - Creating command. UserId={userId.Value}");
+
             var command = new CommandDefinition(
                 sql,
                 new { UserId = userId.Value },
                 commandTimeout: 30,
                 cancellationToken: cancellationToken);
 
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 3 - Executing profile query...");
+
+            var queryWatch = Stopwatch.StartNew();
+
             var row = await connection.QueryFirstOrDefaultAsync<ProfileMeRow>(command);
+
+            queryWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 3 OK - Query finished. ElapsedMs={queryWatch.ElapsedMilliseconds}");
 
             if (row is null)
             {
+                Console.WriteLine($"[PROFILE:{requestId}] END NotFound - Profile not found. ElapsedMs={totalWatch.ElapsedMilliseconds}");
+
                 return NotFound(new
                 {
                     error = new
@@ -318,9 +351,22 @@ public class ProfileController : ControllerBase
                 });
             }
 
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 4 - Row found. Role={row.Role}, FullName={row.FullName ?? "NULL"}");
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 5 - CompaniesJson length={row.CompaniesJson?.Length ?? 0}");
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 - Parsing companies JSON...");
+
+            var parseWatch = Stopwatch.StartNew();
+
             var companies = ParseCompanies(row.CompaniesJson);
 
-            return Ok(new
+            parseWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 OK - Companies parsed. Count={companies.Length}, ElapsedMs={parseWatch.ElapsedMilliseconds}");
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 7 - Building response...");
+
+            var response = new
             {
                 data = new
                 {
@@ -344,10 +390,21 @@ public class ProfileController : ControllerBase
                     companies
                 },
                 message = "OK"
-            });
+            };
+
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] END OK. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+
+            return Ok(response);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] CANCELLED. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+            Console.WriteLine(ex.ToString());
+
             return StatusCode(499, new
             {
                 error = new
@@ -357,9 +414,30 @@ public class ProfileController : ControllerBase
                 }
             });
         }
+        catch (NpgsqlException ex)
+        {
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] NPGSQL ERROR. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+            Console.WriteLine($"[PROFILE:{requestId}] Npgsql Message: {ex.Message}");
+            Console.WriteLine($"[PROFILE:{requestId}] Inner Message: {ex.InnerException?.Message ?? "NULL"}");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "PROFILE_DATABASE_ERROR",
+                    message = ex.Message,
+                    innerMessage = ex.InnerException?.Message
+                }
+            });
+        }
         catch (Exception ex)
         {
-            Console.WriteLine("PROFILE ERROR:");
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] GENERAL ERROR. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
             Console.WriteLine(ex.ToString());
 
             return StatusCode(500, new
@@ -401,8 +479,10 @@ public class ProfileController : ControllerBase
         {
             return JsonSerializer.Deserialize<object[]>(companiesJson) ?? [];
         }
-        catch
+        catch (Exception ex)
         {
+            Console.WriteLine("[PROFILE] ParseCompanies ERROR:");
+            Console.WriteLine(ex.ToString());
             return [];
         }
     }
