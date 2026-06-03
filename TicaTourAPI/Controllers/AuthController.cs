@@ -1,4 +1,5 @@
 ﻿using Dapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Net.Http.Headers;
@@ -484,6 +485,69 @@ public class AuthController : ControllerBase
         });
     }
 
+    [Authorize]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        var accessToken = GetBearerToken();
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "TOKEN_NOT_FOUND",
+                    message = "Bearer token was not found."
+                }
+            });
+        }
+
+        return await SignOutFromSupabaseAsync(accessToken, "local");
+    }
+
+    [Authorize]
+    [HttpPost("logout-all")]
+    public async Task<IActionResult> LogoutAll()
+    {
+        var accessToken = GetBearerToken();
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "TOKEN_NOT_FOUND",
+                    message = "Bearer token was not found."
+                }
+            });
+        }
+
+        return await SignOutFromSupabaseAsync(accessToken, "global");
+    }
+
+    [Authorize]
+    [HttpPost("logout-others")]
+    public async Task<IActionResult> LogoutOthers()
+    {
+        var accessToken = GetBearerToken();
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "TOKEN_NOT_FOUND",
+                    message = "Bearer token was not found."
+                }
+            });
+        }
+
+        return await SignOutFromSupabaseAsync(accessToken, "others");
+    }
+
     private IActionResult? ValidateCommonUserFields(
         string email,
         string password,
@@ -542,6 +606,97 @@ public class AuthController : ControllerBase
         }
 
         return null;
+    }
+
+    private string? GetBearerToken()
+    {
+        var authorizationHeader = Request.Headers.Authorization.ToString();
+
+        if (string.IsNullOrWhiteSpace(authorizationHeader))
+        {
+            return null;
+        }
+
+        const string bearerPrefix = "Bearer ";
+
+        if (!authorizationHeader.StartsWith(bearerPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return authorizationHeader[bearerPrefix.Length..].Trim();
+    }
+
+    private async Task<IActionResult> SignOutFromSupabaseAsync(string accessToken, string scope)
+    {
+        var projectUrl = _configuration["Supabase:ProjectUrl"];
+        var anonKey = _configuration["Supabase:AnonKey"];
+
+        if (string.IsNullOrWhiteSpace(projectUrl) || string.IsNullOrWhiteSpace(anonKey))
+        {
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "SUPABASE_CONFIG_MISSING",
+                    message = "Supabase ProjectUrl or AnonKey is missing."
+                }
+            });
+        }
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+
+            var requestUrl = $"{projectUrl.TrimEnd('/')}/auth/v1/logout?scope={scope}";
+
+            using var requestMessage = new HttpRequestMessage(HttpMethod.Post, requestUrl);
+
+            requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            requestMessage.Headers.Add("apikey", anonKey);
+
+            using var response = await client.SendAsync(requestMessage);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine("SUPABASE LOGOUT ERROR:");
+                Console.WriteLine(responseContent);
+
+                return StatusCode((int)response.StatusCode, new
+                {
+                    error = new
+                    {
+                        code = "SUPABASE_LOGOUT_FAILED",
+                        message = responseContent
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = new
+                {
+                    signedOut = true,
+                    scope
+                },
+                message = "Session closed successfully."
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("LOGOUT ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "LOGOUT_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
     }
 
     private async Task<CreateAuthUserResult> CreateSupabaseAuthUserAsync(
