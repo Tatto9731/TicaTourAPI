@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using TicaTourAPI.Data;
@@ -716,6 +717,374 @@ public class AuthController : ControllerBase
         }
 
         return await SignOutFromSupabaseAsync(accessToken, "others");
+    }
+
+    [Authorize]
+    [HttpPost("complete-social-profile")]
+    public async Task<IActionResult> CompleteSocialProfile(
+    [FromBody] CompleteSocialProfileRequest? request,
+    CancellationToken cancellationToken)
+    {
+        request ??= new CompleteSocialProfileRequest();
+
+        var userId = GetUserId();
+
+        if (userId is null)
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "UNAUTHORIZED",
+                    message = "User ID was not found in the token."
+                }
+            });
+        }
+
+        var email = GetEmailFromToken();
+
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "EMAIL_NOT_FOUND",
+                    message = "Email was not found in the token."
+                }
+            });
+        }
+
+        if (request.PreferredLanguage is not ("es" or "en"))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "INVALID_LANGUAGE",
+                    message = "PreferredLanguage must be 'es' or 'en'."
+                }
+            });
+        }
+
+        if (request.PreferredCurrency is not ("CRC" or "USD"))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "INVALID_CURRENCY",
+                    message = "PreferredCurrency must be 'CRC' or 'USD'."
+                }
+            });
+        }
+
+        if (request.BirthDate.HasValue && request.BirthDate.Value.Date > DateTime.UtcNow.Date)
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "INVALID_BIRTH_DATE",
+                    message = "BirthDate cannot be in the future."
+                }
+            });
+        }
+
+        var fullName = !string.IsNullOrWhiteSpace(request.FullName)
+            ? request.FullName
+            : GetNameFromToken() ?? email;
+
+        try
+        {
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(request.Phone))
+            {
+                const string existingPhoneSql = """
+                select exists (
+                    select 1
+                    from public.profiles
+                    where phone = @Phone
+                      and id <> @UserId
+                );
+            """;
+
+                var phoneExists = await connection.ExecuteScalarAsync<bool>(
+                    existingPhoneSql,
+                    new
+                    {
+                        UserId = userId.Value,
+                        request.Phone
+                    });
+
+                if (phoneExists)
+                {
+                    return Conflict(new
+                    {
+                        error = new
+                        {
+                            code = "PHONE_ALREADY_EXISTS",
+                            message = "A user with this phone number already exists."
+                        }
+                    });
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.IdNumber))
+            {
+                const string existingIdNumberSql = """
+                select exists (
+                    select 1
+                    from public.profiles
+                    where id_number = @IdNumber
+                      and id <> @UserId
+                );
+            """;
+
+                var idNumberExists = await connection.ExecuteScalarAsync<bool>(
+                    existingIdNumberSql,
+                    new
+                    {
+                        UserId = userId.Value,
+                        request.IdNumber
+                    });
+
+                if (idNumberExists)
+                {
+                    return Conflict(new
+                    {
+                        error = new
+                        {
+                            code = "ID_NUMBER_ALREADY_EXISTS",
+                            message = "A user with this ID number already exists."
+                        }
+                    });
+                }
+            }
+
+            const string profileExistsSql = """
+            select exists (
+                select 1
+                from public.profiles
+                where id = @UserId
+            );
+        """;
+
+            var profileExists = await connection.ExecuteScalarAsync<bool>(
+                profileExistsSql,
+                new
+                {
+                    UserId = userId.Value
+                });
+
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            try
+            {
+                if (!profileExists)
+                {
+                    const string insertProfileSql = """
+                    insert into public.profiles (
+                        id,
+                        full_name,
+                        role,
+                        phone,
+                        id_number,
+                        birth_date,
+                        preferred_language,
+                        preferred_currency,
+                        profile_completion,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @Id,
+                        @FullName,
+                        'traveler',
+                        @Phone,
+                        @IdNumber,
+                        @BirthDate,
+                        @PreferredLanguage,
+                        @PreferredCurrency,
+                        @ProfileCompletion,
+                        now(),
+                        now()
+                    );
+                """;
+
+                    var profileCompletion = CalculateSocialTravelerProfileCompletion(request);
+
+                    await connection.ExecuteAsync(
+                        insertProfileSql,
+                        new
+                        {
+                            Id = userId.Value,
+                            FullName = fullName,
+                            request.Phone,
+                            request.IdNumber,
+                            BirthDate = request.BirthDate?.Date,
+                            request.PreferredLanguage,
+                            request.PreferredCurrency,
+                            ProfileCompletion = profileCompletion
+                        },
+                        transaction);
+                }
+
+                const string insertTravelerProfileSql = """
+                insert into public.traveler_profiles (
+                    user_id,
+                    travel_interests,
+                    preferences,
+                    requires_transport,
+                    notification_settings,
+                    search_settings,
+                    location_recommendations_enabled,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @UserId,
+                    @Preferences::jsonb,
+                    @Preferences::jsonb,
+                    @RequiresTransport,
+                    '{}'::jsonb,
+                    '{}'::jsonb,
+                    false,
+                    now(),
+                    now()
+                )
+                on conflict (user_id) do nothing;
+            """;
+
+                var preferencesJson = JsonSerializer.Serialize(request.Preferences ?? []);
+
+                await connection.ExecuteAsync(
+                    insertTravelerProfileSql,
+                    new
+                    {
+                        UserId = userId.Value,
+                        Preferences = preferencesJson,
+                        request.RequiresTransport
+                    },
+                    transaction);
+
+                await transaction.CommitAsync(cancellationToken);
+
+                return Ok(new
+                {
+                    data = new
+                    {
+                        completed = true,
+                        profileAlreadyExisted = profileExists,
+                        email,
+                        role = "traveler"
+                    },
+                    message = profileExists
+                        ? "Social profile already exists."
+                        : "Social profile completed successfully."
+                });
+            }
+            catch (PostgresException ex) when (ex.SqlState == "23505")
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "DUPLICATE_USER_DATA",
+                        message = "Phone or ID number is already in use."
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                Console.WriteLine("COMPLETE SOCIAL PROFILE DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "COMPLETE_SOCIAL_PROFILE_DATABASE_ERROR",
+                        message = ex.Message
+                    }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("COMPLETE SOCIAL PROFILE ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "COMPLETE_SOCIAL_PROFILE_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
+    }
+
+    private Guid? GetUserId()
+    {
+        var userId =
+            User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("sub");
+
+        return Guid.TryParse(userId, out var parsed)
+            ? parsed
+            : null;
+    }
+
+    private string? GetEmailFromToken()
+    {
+        return User.FindFirstValue(ClaimTypes.Email)
+               ?? User.FindFirstValue("email");
+    }
+
+    private string? GetNameFromToken()
+    {
+        return User.FindFirstValue(ClaimTypes.Name)
+               ?? User.FindFirstValue("name")
+               ?? User.FindFirstValue("full_name");
+    }
+
+    private static int CalculateSocialTravelerProfileCompletion(CompleteSocialProfileRequest request)
+    {
+        var completion = 30;
+
+        if (!string.IsNullOrWhiteSpace(request.Phone))
+        {
+            completion += 10;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.IdNumber))
+        {
+            completion += 15;
+        }
+
+        if (request.BirthDate.HasValue)
+        {
+            completion += 10;
+        }
+
+        if (request.Preferences is not null && request.Preferences.Length > 0)
+        {
+            completion += 20;
+        }
+
+        if (request.RequiresTransport.HasValue)
+        {
+            completion += 5;
+        }
+
+        return Math.Min(completion, 100);
     }
 
     private IActionResult? ValidateCommonUserFields(
