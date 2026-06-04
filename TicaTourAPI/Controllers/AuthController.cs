@@ -43,6 +43,115 @@ public class AuthController : ControllerBase
             return validationError;
         }
 
+        if (request.BirthDate.HasValue && request.BirthDate.Value.Date > DateTime.UtcNow.Date)
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "INVALID_BIRTH_DATE",
+                    message = "BirthDate cannot be in the future."
+                }
+            });
+        }
+
+        try
+        {
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync();
+
+            const string existingUserSql = """
+            select exists (
+                select 1
+                from auth.users
+                where lower(email) = lower(@Email)
+            );
+        """;
+
+            var emailExists = await connection.ExecuteScalarAsync<bool>(
+                existingUserSql,
+                new { request.Email });
+
+            if (emailExists)
+            {
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "EMAIL_ALREADY_EXISTS",
+                        message = "A user with this email already exists."
+                    }
+                });
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.Phone))
+            {
+                const string existingPhoneSql = """
+                select exists (
+                    select 1
+                    from public.profiles
+                    where phone = @Phone
+                );
+            """;
+
+                var phoneExists = await connection.ExecuteScalarAsync<bool>(
+                    existingPhoneSql,
+                    new { request.Phone });
+
+                if (phoneExists)
+                {
+                    return Conflict(new
+                    {
+                        error = new
+                        {
+                            code = "PHONE_ALREADY_EXISTS",
+                            message = "A user with this phone number already exists."
+                        }
+                    });
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.IdNumber))
+            {
+                const string existingIdNumberSql = """
+                select exists (
+                    select 1
+                    from public.profiles
+                    where id_number = @IdNumber
+                );
+            """;
+
+                var idNumberExists = await connection.ExecuteScalarAsync<bool>(
+                    existingIdNumberSql,
+                    new { request.IdNumber });
+
+                if (idNumberExists)
+                {
+                    return Conflict(new
+                    {
+                        error = new
+                        {
+                            code = "ID_NUMBER_ALREADY_EXISTS",
+                            message = "A user with this ID number already exists."
+                        }
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("REGISTER TRAVELER VALIDATION ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "REGISTRATION_VALIDATION_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
+
         var authUserResult = await CreateSupabaseAuthUserAsync(
             request.Email,
             request.Password,
@@ -69,66 +178,97 @@ public class AuthController : ControllerBase
             try
             {
                 const string insertProfileSql = """
-                    insert into public.profiles (
-                        id,
-                        full_name,
-                        role,
-                        phone,
-                        preferred_language,
-                        preferred_currency,
-                        profile_completion,
-                        created_at,
-                        updated_at
-                    )
-                    values (
-                        @Id,
-                        @FullName,
-                        'traveler',
-                        @Phone,
-                        @PreferredLanguage,
-                        @PreferredCurrency,
-                        30,
-                        now(),
-                        now()
-                    );
-                """;
+                insert into public.profiles (
+                    id,
+                    full_name,
+                    role,
+                    phone,
+                    id_number,
+                    birth_date,
+                    preferred_language,
+                    preferred_currency,
+                    profile_completion,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @Id,
+                    @FullName,
+                    'traveler',
+                    @Phone,
+                    @IdNumber,
+                    @BirthDate,
+                    @PreferredLanguage,
+                    @PreferredCurrency,
+                    @ProfileCompletion,
+                    now(),
+                    now()
+                );
+            """;
 
                 const string insertTravelerProfileSql = """
-                    insert into public.traveler_profiles (
-                        user_id,
-                        travel_interests,
-                        notification_settings,
-                        search_settings,
-                        location_recommendations_enabled,
-                        created_at,
-                        updated_at
-                    )
-                    values (
-                        @UserId,
-                        '[]'::jsonb,
-                        '{}'::jsonb,
-                        '{}'::jsonb,
-                        false,
-                        now(),
-                        now()
-                    );
-                """;
+                insert into public.traveler_profiles (
+                    user_id,
+                    travel_interests,
+                    preferences,
+                    requires_transport,
+                    notification_settings,
+                    search_settings,
+                    location_recommendations_enabled,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @UserId,
+                    @Preferences::jsonb,
+                    @Preferences::jsonb,
+                    @RequiresTransport,
+                    '{}'::jsonb,
+                    '{}'::jsonb,
+                    false,
+                    now(),
+                    now()
+                );
+            """;
+
+                var profileCompletion = CalculateTravelerProfileCompletion(request);
+
+                var preferencesJson = JsonSerializer.Serialize(request.Preferences ?? []);
 
                 await connection.ExecuteAsync(insertProfileSql, new
                 {
                     Id = authUserResult.UserId,
                     request.FullName,
                     request.Phone,
+                    request.IdNumber,
+                    BirthDate = request.BirthDate?.Date,
                     request.PreferredLanguage,
-                    request.PreferredCurrency
+                    request.PreferredCurrency,
+                    ProfileCompletion = profileCompletion
                 }, transaction);
 
                 await connection.ExecuteAsync(insertTravelerProfileSql, new
                 {
-                    UserId = authUserResult.UserId
+                    UserId = authUserResult.UserId,
+                    Preferences = preferencesJson,
+                    request.RequiresTransport
                 }, transaction);
 
                 await transaction.CommitAsync();
+            }
+            catch (PostgresException ex) when (ex.SqlState == "23505")
+            {
+                await transaction.RollbackAsync();
+                await DeleteSupabaseAuthUserAsync(authUserResult.UserId);
+
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "DUPLICATE_USER_DATA",
+                        message = "Email, phone or ID number is already in use."
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -175,7 +315,6 @@ public class AuthController : ControllerBase
                 {
                     user = new
                     {
-                        id = authUserResult.UserId,
                         email = request.Email,
                         name = request.FullName,
                         role = "traveler"
@@ -193,7 +332,6 @@ public class AuthController : ControllerBase
                 refreshToken = loginResult.RefreshToken,
                 user = new
                 {
-                    id = authUserResult.UserId,
                     email = request.Email,
                     name = request.FullName,
                     role = "traveler"
@@ -201,6 +339,38 @@ public class AuthController : ControllerBase
             },
             message = "OK"
         });
+    }
+
+    private static int CalculateTravelerProfileCompletion(RegisterTravelerRequest request)
+    {
+        var completion = 30;
+
+        if (!string.IsNullOrWhiteSpace(request.Phone))
+        {
+            completion += 10;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.IdNumber))
+        {
+            completion += 15;
+        }
+
+        if (request.BirthDate.HasValue)
+        {
+            completion += 10;
+        }
+
+        if (request.Preferences is not null && request.Preferences.Length > 0)
+        {
+            completion += 20;
+        }
+
+        if (request.RequiresTransport.HasValue)
+        {
+            completion += 5;
+        }
+
+        return Math.Min(completion, 100);
     }
 
     [HttpPost("register-company")]

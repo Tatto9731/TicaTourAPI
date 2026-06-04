@@ -6,6 +6,13 @@ public sealed class RegisterTravelerRequest
     public string Password { get; set; } = string.Empty;
     public string FullName { get; set; } = string.Empty;
     public string? Phone { get; set; }
+
     public string PreferredLanguage { get; set; } = "es";
     public string PreferredCurrency { get; set; } = "CRC";
+
+    public string? IdNumber { get; set; }
+    public DateTime? BirthDate { get; set; }
+
+    public string[] Preferences { get; set; } = [];
+    public bool? RequiresTransport { get; set; }
 }
