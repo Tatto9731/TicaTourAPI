@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Security.Claims;
+using TicaTourAPI.Data;
 using TicaTourAPI.DTOs.Reviews;
 
 namespace TicaTourAPI.Controllers;
@@ -12,17 +13,18 @@ namespace TicaTourAPI.Controllers;
 [Route("api/Me")]
 public class MeReviewsController : ControllerBase
 {
-    private readonly NpgsqlConnection _connection;
+    private readonly IDbConnectionFactory _connectionFactory;
 
-    public MeReviewsController(NpgsqlConnection connection)
+    public MeReviewsController(IDbConnectionFactory connectionFactory)
     {
-        _connection = connection;
+        _connectionFactory = connectionFactory;
     }
 
     [HttpPost("Bookings/{bookingCode}/Review")]
     public async Task<IActionResult> CreateReviewForBooking(
         [FromRoute] string bookingCode,
-        [FromBody] CreateReviewRequest request)
+        [FromBody] CreateReviewRequest request,
+        CancellationToken cancellationToken)
     {
         var userId = GetUserId();
 
@@ -38,159 +40,192 @@ public class MeReviewsController : ControllerBase
             return validation;
         }
 
-        await _connection.OpenAsync();
-
-        await using var transaction = await _connection.BeginTransactionAsync();
-
         try
         {
-            const string bookingSql = """
-                select
-                    b.id,
-                    b.experience_id,
-                    b.status
-                from public.bookings b
-                where b.booking_code = @BookingCode
-                  and b.user_id = @UserId
-                limit 1;
-            """;
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            var booking = await _connection.QueryFirstOrDefaultAsync(
-                bookingSql,
-                new
-                {
-                    BookingCode = bookingCode,
-                    UserId = userId.Value
-                },
-                transaction);
-
-            if (booking is null)
+            try
             {
-                await transaction.RollbackAsync();
-
-                return NotFound(new
-                {
-                    error = new
-                    {
-                        code = "BOOKING_NOT_FOUND",
-                        message = "Booking was not found."
-                    }
-                });
-            }
-
-            if ((string)booking.status != "Completed")
-            {
-                await transaction.RollbackAsync();
-
-                return BadRequest(new
-                {
-                    error = new
-                    {
-                        code = "BOOKING_NOT_COMPLETED",
-                        message = "Only completed bookings can receive a review."
-                    }
-                });
-            }
-
-            const string insertReviewSql = """
-                insert into public.reviews (
-                    user_id,
-                    experience_id,
-                    booking_id,
-                    rating,
-                    comment,
-                    status,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @UserId,
-                    @ExperienceId,
-                    @BookingId,
-                    @Rating,
-                    @Comment,
-                    'Published',
-                    now(),
-                    now()
-                )
-                returning
-                    id,
-                    rating,
-                    comment,
-                    status,
-                    created_at;
-            """;
-
-            var review = await _connection.QueryFirstOrDefaultAsync(
-                insertReviewSql,
-                new
-                {
-                    UserId = userId.Value,
-                    ExperienceId = (Guid)booking.experience_id,
-                    BookingId = (Guid)booking.id,
-                    request.Rating,
-                    request.Comment
-                },
-                transaction);
-
-            const string updateExperienceRatingSql = """
-                update public.experiences e
-                set
-                    rating_avg = sub.rating_avg,
-                    reviews_count = sub.reviews_count,
-                    updated_at = now()
-                from (
+                const string bookingSql = """
                     select
-                        experience_id,
-                        round(avg(rating)::numeric, 2) as rating_avg,
-                        count(*)::integer as reviews_count
-                    from public.reviews
-                    where experience_id = @ExperienceId
-                      and status = 'Published'
-                    group by experience_id
-                ) sub
-                where e.id = sub.experience_id;
-            """;
+                        b.id,
+                        b.experience_id,
+                        b.status
+                    from public.bookings b
+                    where b.booking_code = @BookingCode
+                      and b.user_id = @UserId
+                    limit 1;
+                """;
 
-            await _connection.ExecuteAsync(
-                updateExperienceRatingSql,
-                new
+                var booking = await connection.QueryFirstOrDefaultAsync(
+                    new CommandDefinition(
+                        bookingSql,
+                        new
+                        {
+                            BookingCode = bookingCode,
+                            UserId = userId.Value
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                if (booking is null)
                 {
-                    ExperienceId = (Guid)booking.experience_id
-                },
-                transaction);
+                    await transaction.RollbackAsync(cancellationToken);
 
-            await transaction.CommitAsync();
-
-            return Ok(new
-            {
-                data = review,
-                message = "Review created successfully."
-            });
-        }
-        catch (PostgresException ex) when (ex.SqlState == "23505")
-        {
-            await transaction.RollbackAsync();
-
-            return Conflict(new
-            {
-                error = new
-                {
-                    code = "REVIEW_ALREADY_EXISTS",
-                    message = "This booking already has a review."
+                    return NotFound(new
+                    {
+                        error = new
+                        {
+                            code = "BOOKING_NOT_FOUND",
+                            message = "Booking was not found."
+                        }
+                    });
                 }
-            });
+
+                if ((string)booking.status != "Completed")
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+
+                    return BadRequest(new
+                    {
+                        error = new
+                        {
+                            code = "BOOKING_NOT_COMPLETED",
+                            message = "Only completed bookings can receive a review."
+                        }
+                    });
+                }
+
+                const string insertReviewSql = """
+                    insert into public.reviews (
+                        user_id,
+                        experience_id,
+                        booking_id,
+                        rating,
+                        comment,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @UserId,
+                        @ExperienceId,
+                        @BookingId,
+                        @Rating,
+                        @Comment,
+                        'Published',
+                        now(),
+                        now()
+                    )
+                    returning
+                        rating,
+                        comment,
+                        status,
+                        created_at;
+                """;
+
+                var review = await connection.QueryFirstOrDefaultAsync(
+                    new CommandDefinition(
+                        insertReviewSql,
+                        new
+                        {
+                            UserId = userId.Value,
+                            ExperienceId = (Guid)booking.experience_id,
+                            BookingId = (Guid)booking.id,
+                            request.Rating,
+                            request.Comment
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                const string updateExperienceRatingSql = """
+                    update public.experiences e
+                    set
+                        rating_avg = sub.rating_avg,
+                        reviews_count = sub.reviews_count,
+                        updated_at = now()
+                    from (
+                        select
+                            experience_id,
+                            round(avg(rating)::numeric, 2) as rating_avg,
+                            count(*)::integer as reviews_count
+                        from public.reviews
+                        where experience_id = @ExperienceId
+                          and status = 'Published'
+                        group by experience_id
+                    ) sub
+                    where e.id = sub.experience_id;
+                """;
+
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        updateExperienceRatingSql,
+                        new
+                        {
+                            ExperienceId = (Guid)booking.experience_id
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                await transaction.CommitAsync(cancellationToken);
+
+                return Ok(new
+                {
+                    data = new
+                    {
+                        rating = (int)review.rating,
+                        comment = (string)review.comment,
+                        status = (string)review.status,
+                        createdAt = review.created_at
+                    },
+                    message = "Review created successfully."
+                });
+            }
+            catch (PostgresException ex) when (ex.SqlState == "23505")
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "REVIEW_ALREADY_EXISTS",
+                        message = "This booking already has a review."
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                Console.WriteLine("REVIEW CREATION DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "REVIEW_CREATION_FAILED",
+                        message = ex.Message
+                    }
+                });
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            await transaction.RollbackAsync();
+            Console.WriteLine("REVIEW CREATION CONNECTION ERROR:");
+            Console.WriteLine(ex.ToString());
 
             return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "REVIEW_CREATION_FAILED",
-                    message = "The review could not be created."
+                    code = "REVIEW_CREATION_CONNECTION_FAILED",
+                    message = ex.Message
                 }
             });
         }
@@ -199,7 +234,8 @@ public class MeReviewsController : ControllerBase
     [HttpGet("Reviews")]
     public async Task<IActionResult> GetMyReviews(
         [FromQuery] int page = 1,
-        [FromQuery] int perPage = 20)
+        [FromQuery] int perPage = 20,
+        CancellationToken cancellationToken = default)
     {
         var userId = GetUserId();
 
@@ -215,7 +251,6 @@ public class MeReviewsController : ControllerBase
 
         const string sql = """
             select
-                r.id,
                 r.rating,
                 r.comment,
                 r.status,
@@ -248,36 +283,65 @@ public class MeReviewsController : ControllerBase
             Offset = offset
         };
 
-        var reviews = await _connection.QueryAsync(sql, parameters);
-        var total = await _connection.ExecuteScalarAsync<int>(countSql, parameters);
-
-        return Ok(new
+        try
         {
-            data = reviews.Select(r => new
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+
+            var reviews = await connection.QueryAsync(
+                new CommandDefinition(
+                    sql,
+                    parameters,
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            var total = await connection.ExecuteScalarAsync<int>(
+                new CommandDefinition(
+                    countSql,
+                    parameters,
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            return Ok(new
             {
-                id = (Guid)r.id,
-                rating = (int)r.rating,
-                comment = (string)r.comment,
-                status = (string)r.status,
-                createdAt = r.created_at,
-                bookingCode = (string?)r.booking_code,
-                experience = new
+                data = reviews.Select(r => new
                 {
-                    publicCode = (string)r.experience_public_code,
-                    slug = (string)r.experience_slug,
-                    title = (string)r.experience_title,
-                    image = (string?)r.experience_image
-                }
-            }),
-            meta = new
+                    rating = (int)r.rating,
+                    comment = (string)r.comment,
+                    status = (string)r.status,
+                    createdAt = r.created_at,
+                    bookingCode = (string?)r.booking_code,
+                    experience = new
+                    {
+                        publicCode = (string)r.experience_public_code,
+                        slug = (string)r.experience_slug,
+                        title = (string)r.experience_title,
+                        image = (string?)r.experience_image
+                    }
+                }),
+                meta = new
+                {
+                    page,
+                    perPage,
+                    total,
+                    totalPages = (int)Math.Ceiling(total / (double)perPage)
+                },
+                message = "OK"
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GET MY REVIEWS ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
-                page,
-                perPage,
-                total,
-                totalPages = (int)Math.Ceiling(total / (double)perPage)
-            },
-            message = "OK"
-        });
+                error = new
+                {
+                    code = "GET_MY_REVIEWS_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
     }
 
     private Guid? GetUserId()
