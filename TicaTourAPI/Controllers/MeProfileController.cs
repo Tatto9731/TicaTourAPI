@@ -2,396 +2,318 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using TicaTourAPI.Data;
-using TicaTourAPI.DTOs.Me;
 
 namespace TicaTourAPI.Controllers;
 
 [Authorize]
 [ApiController]
-[Route("api/Me/Profile")]
-public class MeProfileController : ControllerBase
+[Route("api/[controller]")]
+public class ProfileController : ControllerBase
 {
     private readonly IDbConnectionFactory _connectionFactory;
 
-    public MeProfileController(IDbConnectionFactory connectionFactory)
+    public ProfileController(IDbConnectionFactory connectionFactory)
     {
         _connectionFactory = connectionFactory;
     }
 
-    [HttpPatch]
-    public async Task<IActionResult> UpdateMyProfile(
-        [FromBody] UpdateMyProfileRequest request,
-        CancellationToken cancellationToken)
+    [HttpGet("me")]
+    public async Task<IActionResult> GetMyProfile(CancellationToken cancellationToken)
     {
+        var requestId = Guid.NewGuid().ToString("N")[..8];
+        var totalWatch = Stopwatch.StartNew();
+
+        Console.WriteLine($"[PROFILE:{requestId}] START /api/Profile/me");
+
         var userId = GetUserId();
+
+        Console.WriteLine($"[PROFILE:{requestId}] Token userId raw parsed: {(userId is null ? "NULL" : userId.Value.ToString())}");
 
         if (userId is null)
         {
-            return UnauthorizedResponse();
+            Console.WriteLine($"[PROFILE:{requestId}] END Unauthorized - User ID not found in token. ElapsedMs={totalWatch.ElapsedMilliseconds}");
+
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "UNAUTHORIZED",
+                    message = "User ID was not found in the token."
+                }
+            });
         }
 
-        var validation = ValidateRequest(request);
+        var email = GetEmailFromToken();
 
-        if (validation is not null)
-        {
-            return validation;
-        }
+        Console.WriteLine($"[PROFILE:{requestId}] Token email: {email ?? "NULL"}");
 
         try
         {
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 1 - Opening DB connection...");
+
+            var connectionWatch = Stopwatch.StartNew();
+
             await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
 
-            if (!string.IsNullOrWhiteSpace(request.Phone))
+            connectionWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 1 OK - DB connection opened. ElapsedMs={connectionWatch.ElapsedMilliseconds}");
+            Console.WriteLine($"[PROFILE:{requestId}] DB State after open: {connection.State}");
+
+            const string sql = """
+                select
+                    p.id as UserId,
+                    p.full_name as FullName,
+                    p.role as Role,
+                    p.phone as Phone,
+                    p.avatar_url as AvatarUrl,
+                    p.preferred_language as PreferredLanguage,
+                    p.preferred_currency as PreferredCurrency,
+                    p.dark_mode as DarkMode,
+                    p.profile_completion as ProfileCompletion,
+                    p.is_identity_verified as IsIdentityVerified,
+                    p.id_number as IdNumber,
+                    p.birth_date::text as BirthDate,
+                    p.created_at as CreatedAt,
+                    p.updated_at as UpdatedAt,
+
+                    coalesce(tp.preferences, '[]'::jsonb)::text as PreferencesJson,
+                    tp.requires_transport as RequiresTransport,
+
+                    coalesce(
+                        jsonb_agg(
+                            jsonb_build_object(
+                                'name', c.name,
+                                'slug', c.slug,
+                                'description', c.description,
+                                'province', c.province,
+                                'zone', c.zone,
+                                'logoUrl', c.logo_url,
+                                'coverImageUrl', c.cover_image_url,
+                                'phone', c.phone,
+                                'whatsapp', c.whatsapp,
+                                'email', c.email,
+                                'websiteUrl', c.website_url,
+                                'isVerified', c.is_verified,
+                                'companyRole', cu.role,
+                                'createdAt', cu.created_at
+                            )
+                        ) filter (where c.id is not null),
+                        '[]'::jsonb
+                    )::text as CompaniesJson
+
+                from public.profiles p
+                left join public.traveler_profiles tp on tp.user_id = p.id
+                left join public.company_users cu on cu.user_id = p.id
+                left join public.companies c on c.id = cu.company_id
+                where p.id = @UserId
+                group by
+                    p.id,
+                    p.full_name,
+                    p.role,
+                    p.phone,
+                    p.avatar_url,
+                    p.preferred_language,
+                    p.preferred_currency,
+                    p.dark_mode,
+                    p.profile_completion,
+                    p.is_identity_verified,
+                    p.id_number,
+                    p.birth_date,
+                    p.created_at,
+                    p.updated_at,
+                    tp.preferences,
+                    tp.requires_transport
+                limit 1;
+            """;
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 2 - Creating command. UserId={userId.Value}");
+
+            var command = new CommandDefinition(
+                sql,
+                new { UserId = userId.Value },
+                commandTimeout: 30,
+                cancellationToken: cancellationToken);
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 3 - Executing profile query...");
+
+            var queryWatch = Stopwatch.StartNew();
+
+            var row = await connection.QueryFirstOrDefaultAsync<ProfileMeRow>(command);
+
+            queryWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 3 OK - Query finished. ElapsedMs={queryWatch.ElapsedMilliseconds}");
+
+            if (row is null)
             {
-                const string phoneExistsSql = """
-                    select exists (
-                        select 1
-                        from public.profiles
-                        where phone = @Phone
-                          and id <> @UserId
-                    );
-                """;
+                Console.WriteLine($"[PROFILE:{requestId}] END NotFound - Profile not found. ElapsedMs={totalWatch.ElapsedMilliseconds}");
 
-                var phoneExists = await connection.ExecuteScalarAsync<bool>(
-                    new CommandDefinition(
-                        phoneExistsSql,
-                        new
-                        {
-                            UserId = userId.Value,
-                            request.Phone
-                        },
-                        commandTimeout: 30,
-                        cancellationToken: cancellationToken));
-
-                if (phoneExists)
+                return NotFound(new
                 {
-                    return Conflict(new
+                    error = new
                     {
-                        error = new
-                        {
-                            code = "PHONE_ALREADY_EXISTS",
-                            message = "A user with this phone number already exists."
-                        }
-                    });
-                }
+                        code = "PROFILE_NOT_FOUND",
+                        message = "Profile was not found."
+                    }
+                });
             }
 
-            if (!string.IsNullOrWhiteSpace(request.IdNumber))
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 4 - Row found. Role={row.Role}, FullName={row.FullName ?? "NULL"}");
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 5 - CompaniesJson length={row.CompaniesJson?.Length ?? 0}");
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 - PreferencesJson length={row.PreferencesJson?.Length ?? 0}");
+
+            var companies = ParseCompanies(row.CompaniesJson);
+            var preferences = ParseStringArray(row.PreferencesJson);
+
+            var response = new
             {
-                const string idNumberExistsSql = """
-                    select exists (
-                        select 1
-                        from public.profiles
-                        where id_number = @IdNumber
-                          and id <> @UserId
-                    );
-                """;
-
-                var idNumberExists = await connection.ExecuteScalarAsync<bool>(
-                    new CommandDefinition(
-                        idNumberExistsSql,
-                        new
-                        {
-                            UserId = userId.Value,
-                            request.IdNumber
-                        },
-                        commandTimeout: 30,
-                        cancellationToken: cancellationToken));
-
-                if (idNumberExists)
+                data = new
                 {
-                    return Conflict(new
+                    email,
+                    profile = new
                     {
-                        error = new
-                        {
-                            code = "ID_NUMBER_ALREADY_EXISTS",
-                            message = "A user with this ID number already exists."
-                        }
-                    });
-                }
-            }
+                        fullName = row.FullName,
+                        role = row.Role,
+                        phone = row.Phone,
+                        avatarUrl = row.AvatarUrl,
+                        preferredLanguage = row.PreferredLanguage,
+                        preferredCurrency = row.PreferredCurrency,
+                        darkMode = row.DarkMode,
+                        profileCompletion = row.ProfileCompletion,
+                        isIdentityVerified = row.IsIdentityVerified,
 
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                        birthDate = row.BirthDate,
+                        hasIdNumber = !string.IsNullOrWhiteSpace(row.IdNumber),
+                        idNumberMasked = MaskIdNumber(row.IdNumber),
 
-            try
-            {
-                const string updateProfileSql = """
-                    update public.profiles
-                    set
-                        full_name = @FullName,
-                        phone = @Phone,
-                        avatar_url = @AvatarUrl,
-                        preferred_language = @PreferredLanguage,
-                        preferred_currency = @PreferredCurrency,
-                        dark_mode = @DarkMode,
-                        id_number = @IdNumber,
-                        birth_date = @BirthDate,
-                        profile_completion = @ProfileCompletion,
-                        updated_at = now()
-                    where id = @UserId
-                    returning
-                        full_name,
-                        role,
-                        phone,
-                        avatar_url,
-                        preferred_language,
-                        preferred_currency,
-                        dark_mode,
-                        profile_completion,
-                        is_identity_verified,
-                        id_number,
-                        birth_date,
-                        created_at,
-                        updated_at;
-                """;
-
-                const string upsertTravelerProfileSql = """
-                    insert into public.traveler_profiles (
-                        user_id,
-                        travel_interests,
                         preferences,
-                        requires_transport,
-                        notification_settings,
-                        search_settings,
-                        location_recommendations_enabled,
-                        created_at,
-                        updated_at
-                    )
-                    values (
-                        @UserId,
-                        @Preferences::jsonb,
-                        @Preferences::jsonb,
-                        @RequiresTransport,
-                        '{}'::jsonb,
-                        '{}'::jsonb,
-                        false,
-                        now(),
-                        now()
-                    )
-                    on conflict (user_id) do update
-                    set
-                        travel_interests = excluded.travel_interests,
-                        preferences = excluded.preferences,
-                        requires_transport = excluded.requires_transport,
-                        updated_at = now();
-                """;
+                        requiresTransport = row.RequiresTransport,
 
-                var profileCompletion = CalculateProfileCompletion(request);
-                var preferencesJson = JsonSerializer.Serialize(request.Preferences ?? []);
-
-                var updatedProfile = await connection.QueryFirstOrDefaultAsync(
-                    new CommandDefinition(
-                        updateProfileSql,
-                        new
-                        {
-                            UserId = userId.Value,
-                            request.FullName,
-                            request.Phone,
-                            request.AvatarUrl,
-                            request.PreferredLanguage,
-                            request.PreferredCurrency,
-                            request.DarkMode,
-                            request.IdNumber,
-                            BirthDate = request.BirthDate?.Date,
-                            ProfileCompletion = profileCompletion
-                        },
-                        transaction,
-                        commandTimeout: 30,
-                        cancellationToken: cancellationToken));
-
-                if (updatedProfile is null)
-                {
-                    await transaction.RollbackAsync(cancellationToken);
-
-                    return NotFound(new
-                    {
-                        error = new
-                        {
-                            code = "PROFILE_NOT_FOUND",
-                            message = "Profile was not found."
-                        }
-                    });
-                }
-
-                await connection.ExecuteAsync(
-                    new CommandDefinition(
-                        upsertTravelerProfileSql,
-                        new
-                        {
-                            UserId = userId.Value,
-                            Preferences = preferencesJson,
-                            request.RequiresTransport
-                        },
-                        transaction,
-                        commandTimeout: 30,
-                        cancellationToken: cancellationToken));
-
-                await transaction.CommitAsync(cancellationToken);
-
-                return Ok(new
-                {
-                    data = new
-                    {
-                        profile = new
-                        {
-                            fullName = (string?)updatedProfile.full_name,
-                            role = (string)updatedProfile.role,
-                            phone = (string?)updatedProfile.phone,
-                            avatarUrl = (string?)updatedProfile.avatar_url,
-                            preferredLanguage = (string)updatedProfile.preferred_language,
-                            preferredCurrency = (string)updatedProfile.preferred_currency,
-                            darkMode = (bool)updatedProfile.dark_mode,
-                            profileCompletion = (int)updatedProfile.profile_completion,
-                            isIdentityVerified = (bool)updatedProfile.is_identity_verified,
-                            birthDate = updatedProfile.birth_date,
-                            hasIdNumber = !string.IsNullOrWhiteSpace((string?)updatedProfile.id_number),
-                            idNumberMasked = MaskIdNumber((string?)updatedProfile.id_number),
-                            preferences = request.Preferences ?? [],
-                            requiresTransport = request.RequiresTransport,
-                            createdAt = updatedProfile.created_at,
-                            updatedAt = updatedProfile.updated_at
-                        }
+                        createdAt = row.CreatedAt,
+                        updatedAt = row.UpdatedAt
                     },
-                    message = "Profile updated successfully."
-                });
-            }
-            catch (PostgresException ex) when (ex.SqlState == "23505")
-            {
-                await transaction.RollbackAsync(cancellationToken);
+                    companies
+                },
+                message = "OK"
+            };
 
-                return Conflict(new
-                {
-                    error = new
-                    {
-                        code = "DUPLICATE_PROFILE_DATA",
-                        message = "Phone or ID number is already in use."
-                    }
-                });
-            }
-            catch (Exception ex)
-            {
-                await transaction.RollbackAsync(cancellationToken);
+            totalWatch.Stop();
 
-                Console.WriteLine("UPDATE PROFILE DATABASE ERROR:");
-                Console.WriteLine(ex.ToString());
+            Console.WriteLine($"[PROFILE:{requestId}] END OK. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
 
-                return StatusCode(500, new
-                {
-                    error = new
-                    {
-                        code = "UPDATE_PROFILE_DATABASE_ERROR",
-                        message = ex.Message
-                    }
-                });
-            }
+            return Ok(response);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException ex)
         {
-            Console.WriteLine("UPDATE PROFILE ERROR:");
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] CANCELLED. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(499, new
+            {
+                error = new
+                {
+                    code = "REQUEST_CANCELLED",
+                    message = "The request was cancelled."
+                }
+            });
+        }
+        catch (NpgsqlException ex)
+        {
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] NPGSQL ERROR. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+            Console.WriteLine($"[PROFILE:{requestId}] Npgsql Message: {ex.Message}");
+            Console.WriteLine($"[PROFILE:{requestId}] Inner Message: {ex.InnerException?.Message ?? "NULL"}");
             Console.WriteLine(ex.ToString());
 
             return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "UPDATE_PROFILE_ERROR",
+                    code = "PROFILE_DATABASE_ERROR",
+                    message = ex.Message,
+                    innerMessage = ex.InnerException?.Message
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            totalWatch.Stop();
+
+            Console.WriteLine($"[PROFILE:{requestId}] GENERAL ERROR. TotalElapsedMs={totalWatch.ElapsedMilliseconds}");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "PROFILE_ERROR",
                     message = ex.Message
                 }
             });
         }
     }
 
-    private IActionResult? ValidateRequest(UpdateMyProfileRequest request)
+    private Guid? GetUserId()
     {
-        if (string.IsNullOrWhiteSpace(request.FullName))
-        {
-            return BadRequest(new
-            {
-                error = new
-                {
-                    code = "VALIDATION_ERROR",
-                    message = "FullName is required."
-                }
-            });
-        }
+        var userId =
+            User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("sub");
 
-        if (request.PreferredLanguage is not ("es" or "en"))
-        {
-            return BadRequest(new
-            {
-                error = new
-                {
-                    code = "INVALID_LANGUAGE",
-                    message = "PreferredLanguage must be es or en."
-                }
-            });
-        }
-
-        if (request.PreferredCurrency is not ("CRC" or "USD"))
-        {
-            return BadRequest(new
-            {
-                error = new
-                {
-                    code = "INVALID_CURRENCY",
-                    message = "PreferredCurrency must be CRC or USD."
-                }
-            });
-        }
-
-        if (request.BirthDate.HasValue && request.BirthDate.Value.Date > DateTime.UtcNow.Date)
-        {
-            return BadRequest(new
-            {
-                error = new
-                {
-                    code = "INVALID_BIRTH_DATE",
-                    message = "BirthDate cannot be in the future."
-                }
-            });
-        }
-
-        return null;
+        return Guid.TryParse(userId, out var parsed)
+            ? parsed
+            : null;
     }
 
-    private static int CalculateProfileCompletion(UpdateMyProfileRequest request)
+    private string? GetEmailFromToken()
     {
-        var completion = 30;
+        return User.FindFirstValue(ClaimTypes.Email)
+               ?? User.FindFirstValue("email");
+    }
 
-        if (!string.IsNullOrWhiteSpace(request.Phone))
+    private static object[] ParseCompanies(string? companiesJson)
+    {
+        if (string.IsNullOrWhiteSpace(companiesJson))
         {
-            completion += 10;
+            return [];
         }
 
-        if (!string.IsNullOrWhiteSpace(request.IdNumber))
+        try
         {
-            completion += 15;
+            return JsonSerializer.Deserialize<object[]>(companiesJson) ?? [];
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[PROFILE] ParseCompanies ERROR:");
+            Console.WriteLine(ex.ToString());
+            return [];
+        }
+    }
+
+    private static string[] ParseStringArray(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
         }
 
-        if (request.BirthDate.HasValue)
+        try
         {
-            completion += 10;
+            return JsonSerializer.Deserialize<string[]>(json) ?? [];
         }
-
-        if (request.Preferences is not null && request.Preferences.Length > 0)
+        catch (Exception ex)
         {
-            completion += 20;
+            Console.WriteLine("[PROFILE] ParseStringArray ERROR:");
+            Console.WriteLine(ex.ToString());
+            return [];
         }
-
-        if (request.RequiresTransport.HasValue)
-        {
-            completion += 5;
-        }
-
-        if (!string.IsNullOrWhiteSpace(request.AvatarUrl))
-        {
-            completion += 10;
-        }
-
-        return Math.Min(completion, 100);
     }
 
     private static string? MaskIdNumber(string? idNumber)
@@ -413,26 +335,28 @@ public class MeProfileController : ControllerBase
         return $"****{lastFour}";
     }
 
-    private Guid? GetUserId()
+    private sealed class ProfileMeRow
     {
-        var userId =
-            User.FindFirstValue(ClaimTypes.NameIdentifier)
-            ?? User.FindFirstValue("sub");
+        public Guid UserId { get; set; }
+        public string? FullName { get; set; }
+        public string Role { get; set; } = string.Empty;
+        public string? Phone { get; set; }
+        public string? AvatarUrl { get; set; }
+        public string PreferredLanguage { get; set; } = "es";
+        public string PreferredCurrency { get; set; } = "CRC";
+        public bool DarkMode { get; set; }
+        public int ProfileCompletion { get; set; }
+        public bool IsIdentityVerified { get; set; }
 
-        return Guid.TryParse(userId, out var parsed)
-            ? parsed
-            : null;
-    }
+        public string? IdNumber { get; set; }
+        public string? BirthDate { get; set; }
 
-    private IActionResult UnauthorizedResponse()
-    {
-        return Unauthorized(new
-        {
-            error = new
-            {
-                code = "UNAUTHORIZED",
-                message = "User ID was not found in the token."
-            }
-        });
+        public string PreferencesJson { get; set; } = "[]";
+        public bool? RequiresTransport { get; set; }
+
+        public DateTime CreatedAt { get; set; }
+        public DateTime UpdatedAt { get; set; }
+
+        public string CompaniesJson { get; set; } = "[]";
     }
 }
