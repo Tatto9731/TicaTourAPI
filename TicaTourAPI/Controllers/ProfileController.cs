@@ -76,8 +76,13 @@ public class ProfileController : ControllerBase
                     p.dark_mode as DarkMode,
                     p.profile_completion as ProfileCompletion,
                     p.is_identity_verified as IsIdentityVerified,
+                    p.id_number as IdNumber,
+                    p.birth_date as BirthDate,
                     p.created_at as CreatedAt,
                     p.updated_at as UpdatedAt,
+
+                    coalesce(tp.preferences, '[]'::jsonb)::text as PreferencesJson,
+                    tp.requires_transport as RequiresTransport,
 
                     coalesce(
                         jsonb_agg(
@@ -102,6 +107,7 @@ public class ProfileController : ControllerBase
                     )::text as CompaniesJson
 
                 from public.profiles p
+                left join public.traveler_profiles tp on tp.user_id = p.id
                 left join public.company_users cu on cu.user_id = p.id
                 left join public.companies c on c.id = cu.company_id
                 where p.id = @UserId
@@ -116,8 +122,12 @@ public class ProfileController : ControllerBase
                     p.dark_mode,
                     p.profile_completion,
                     p.is_identity_verified,
+                    p.id_number,
+                    p.birth_date,
                     p.created_at,
-                    p.updated_at
+                    p.updated_at,
+                    tp.preferences,
+                    tp.requires_transport
                 limit 1;
             """;
 
@@ -155,18 +165,10 @@ public class ProfileController : ControllerBase
 
             Console.WriteLine($"[PROFILE:{requestId}] STEP 4 - Row found. Role={row.Role}, FullName={row.FullName ?? "NULL"}");
             Console.WriteLine($"[PROFILE:{requestId}] STEP 5 - CompaniesJson length={row.CompaniesJson?.Length ?? 0}");
-
-            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 - Parsing companies JSON...");
-
-            var parseWatch = Stopwatch.StartNew();
+            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 - PreferencesJson length={row.PreferencesJson?.Length ?? 0}");
 
             var companies = ParseCompanies(row.CompaniesJson);
-
-            parseWatch.Stop();
-
-            Console.WriteLine($"[PROFILE:{requestId}] STEP 6 OK - Companies parsed. Count={companies.Length}, ElapsedMs={parseWatch.ElapsedMilliseconds}");
-
-            Console.WriteLine($"[PROFILE:{requestId}] STEP 7 - Building response...");
+            var preferences = ParseStringArray(row.PreferencesJson);
 
             var response = new
             {
@@ -184,6 +186,14 @@ public class ProfileController : ControllerBase
                         darkMode = row.DarkMode,
                         profileCompletion = row.ProfileCompletion,
                         isIdentityVerified = row.IsIdentityVerified,
+
+                        birthDate = row.BirthDate,
+                        hasIdNumber = !string.IsNullOrWhiteSpace(row.IdNumber),
+                        idNumberMasked = MaskIdNumber(row.IdNumber),
+
+                        preferences,
+                        requiresTransport = row.RequiresTransport,
+
                         createdAt = row.CreatedAt,
                         updatedAt = row.UpdatedAt
                     },
@@ -287,6 +297,44 @@ public class ProfileController : ControllerBase
         }
     }
 
+    private static string[] ParseStringArray(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(json) ?? [];
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[PROFILE] ParseStringArray ERROR:");
+            Console.WriteLine(ex.ToString());
+            return [];
+        }
+    }
+
+    private static string? MaskIdNumber(string? idNumber)
+    {
+        if (string.IsNullOrWhiteSpace(idNumber))
+        {
+            return null;
+        }
+
+        var clean = idNumber.Trim();
+
+        if (clean.Length <= 4)
+        {
+            return "****";
+        }
+
+        var lastFour = clean[^4..];
+
+        return $"****{lastFour}";
+    }
+
     private sealed class ProfileMeRow
     {
         public Guid UserId { get; set; }
@@ -299,8 +347,16 @@ public class ProfileController : ControllerBase
         public bool DarkMode { get; set; }
         public int ProfileCompletion { get; set; }
         public bool IsIdentityVerified { get; set; }
+
+        public string? IdNumber { get; set; }
+        public DateTime? BirthDate { get; set; }
+
+        public string PreferencesJson { get; set; } = "[]";
+        public bool? RequiresTransport { get; set; }
+
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
+
         public string CompaniesJson { get; set; } = "[]";
     }
 }
