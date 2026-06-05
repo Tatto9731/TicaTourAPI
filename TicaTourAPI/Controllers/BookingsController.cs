@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Security.Claims;
+using TicaTourAPI.Data;
 using TicaTourAPI.DTOs.Bookings;
 
 namespace TicaTourAPI.Controllers;
@@ -12,15 +13,17 @@ namespace TicaTourAPI.Controllers;
 [Route("api/[controller]")]
 public class BookingsController : ControllerBase
 {
-    private readonly NpgsqlConnection _connection;
+    private readonly IDbConnectionFactory _connectionFactory;
 
-    public BookingsController(NpgsqlConnection connection)
+    public BookingsController(IDbConnectionFactory connectionFactory)
     {
-        _connection = connection;
+        _connectionFactory = connectionFactory;
     }
 
     [HttpPost]
-    public async Task<IActionResult> CreateBooking([FromBody] CreateBookingRequest request)
+    public async Task<IActionResult> CreateBooking(
+        [FromBody] CreateBookingRequest request,
+        CancellationToken cancellationToken)
     {
         var userId = GetUserId();
 
@@ -36,154 +39,209 @@ public class BookingsController : ControllerBase
             return validation;
         }
 
-        const string experienceSql = """
-            select
-                e.id as experience_id,
-                e.company_id,
-                e.price,
-                e.price_currency,
-                e.title,
-                e.slug
-            from public.experiences e
-            where e.slug = @ExperienceSlug
-              and e.status = 'Published'
-              and e.is_deleted = false
-            limit 1;
-        """;
-
-        var experience = await _connection.QueryFirstOrDefaultAsync(experienceSql, new
-        {
-            request.ExperienceSlug
-        });
-
-        if (experience is null)
-        {
-            return NotFound(new
-            {
-                error = new
-                {
-                    code = "EXPERIENCE_NOT_FOUND",
-                    message = "Experience was not found or is not available for booking."
-                }
-            });
-        }
-
-        var totalGuests = request.GuestsAdults + request.GuestsChildren;
-        decimal totalAmount = (decimal)experience.price * totalGuests;
-
-        var bookingCode = GenerateBookingCode();
-
-        const string insertSql = """
-            insert into public.bookings (
-                booking_code,
-                user_id,
-                experience_id,
-                company_id,
-                status,
-                guests_adults,
-                guests_children,
-                booking_date,
-                slot_label,
-                total_amount,
-                currency,
-                meeting_point,
-                cancellation_policy,
-                notes,
-                created_at,
-                updated_at
-            )
-            values (
-                @BookingCode,
-                @UserId,
-                @ExperienceId,
-                @CompanyId,
-                'Pending',
-                @GuestsAdults,
-                @GuestsChildren,
-                @BookingDate,
-                @SlotLabel,
-                @TotalAmount,
-                @Currency,
-                @MeetingPoint,
-                'Cancelación gratis hasta 24 horas antes del tour.',
-                @Notes,
-                now(),
-                now()
-            )
-            returning
-                booking_code,
-                status,
-                guests_adults,
-                guests_children,
-                booking_date,
-                slot_label,
-                total_amount,
-                currency,
-                meeting_point,
-                notes,
-                created_at;
-        """;
-
         try
         {
-            var created = await _connection.QueryFirstOrDefaultAsync(insertSql, new
-            {
-                BookingCode = bookingCode,
-                UserId = userId.Value,
-                ExperienceId = (Guid)experience.experience_id,
-                CompanyId = (Guid)experience.company_id,
-                request.GuestsAdults,
-                request.GuestsChildren,
-                BookingDate = request.BookingDate?.Date,
-                request.SlotLabel,
-                TotalAmount = totalAmount,
-                Currency = (string)experience.price_currency,
-                request.MeetingPoint,
-                request.Notes
-            });
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
 
-            const string notificationSql = """
-            insert into public.notifications (
-                user_id,
-                type,
-                title,
-                body,
-                is_read,
-                action_url,
-                created_at
-            )
-            values (
-                @UserId,
-                'booking',
-                'Reserva creada',
-                @Body,
-                false,
-                @ActionUrl,
-                now()
-            );
+            const string experienceSql = """
+                select
+                    e.id as experience_id,
+                    e.company_id,
+                    e.price,
+                    e.price_currency,
+                    e.title,
+                    e.slug
+                from public.experiences e
+                where e.slug = @ExperienceSlug
+                  and e.status = 'Published'
+                  and e.is_deleted = false
+                limit 1;
             """;
 
-            await _connection.ExecuteAsync(notificationSql, new
-            {
-                UserId = userId.Value,
-                Body = $"Tu reserva {bookingCode} fue creada correctamente y está pendiente de confirmación.",
-                ActionUrl = $"/client/profile/bookings/{bookingCode}"
-            });
+            var experience = await connection.QueryFirstOrDefaultAsync(
+                new CommandDefinition(
+                    experienceSql,
+                    new { request.ExperienceSlug },
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
 
-            return Ok(new
+            if (experience is null)
             {
-                data = created,
-                message = "Booking created successfully."
-            });
+                return NotFound(new
+                {
+                    error = new
+                    {
+                        code = "EXPERIENCE_NOT_FOUND",
+                        message = "Experience was not found or is not available for booking."
+                    }
+                });
+            }
+
+            var totalGuests = request.GuestsAdults + request.GuestsChildren;
+            decimal totalAmount = (decimal)experience.price * totalGuests;
+
+            var bookingCode = GenerateBookingCode();
+
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            try
+            {
+                const string insertSql = """
+                    insert into public.bookings (
+                        booking_code,
+                        user_id,
+                        experience_id,
+                        company_id,
+                        status,
+                        guests_adults,
+                        guests_children,
+                        booking_date,
+                        slot_label,
+                        total_amount,
+                        currency,
+                        meeting_point,
+                        cancellation_policy,
+                        notes,
+                        created_at,
+                        updated_at
+                    )
+                    values (
+                        @BookingCode,
+                        @UserId,
+                        @ExperienceId,
+                        @CompanyId,
+                        'Pending',
+                        @GuestsAdults,
+                        @GuestsChildren,
+                        @BookingDate,
+                        @SlotLabel,
+                        @TotalAmount,
+                        @Currency,
+                        @MeetingPoint,
+                        'Cancelación gratis hasta 24 horas antes del tour.',
+                        @Notes,
+                        now(),
+                        now()
+                    )
+                    returning
+                        booking_code,
+                        status,
+                        guests_adults,
+                        guests_children,
+                        booking_date::text as booking_date,
+                        slot_label,
+                        total_amount,
+                        currency,
+                        meeting_point,
+                        notes,
+                        created_at;
+                """;
+
+                var created = await connection.QueryFirstOrDefaultAsync(
+                    new CommandDefinition(
+                        insertSql,
+                        new
+                        {
+                            BookingCode = bookingCode,
+                            UserId = userId.Value,
+                            ExperienceId = (Guid)experience.experience_id,
+                            CompanyId = (Guid)experience.company_id,
+                            request.GuestsAdults,
+                            request.GuestsChildren,
+                            BookingDate = request.BookingDate?.Date,
+                            request.SlotLabel,
+                            TotalAmount = totalAmount,
+                            Currency = (string)experience.price_currency,
+                            request.MeetingPoint,
+                            request.Notes
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                const string notificationSql = """
+                    insert into public.notifications (
+                        user_id,
+                        type,
+                        title,
+                        body,
+                        is_read,
+                        action_url,
+                        created_at
+                    )
+                    values (
+                        @UserId,
+                        'booking',
+                        'Reserva creada',
+                        @Body,
+                        false,
+                        @ActionUrl,
+                        now()
+                    );
+                """;
+
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        notificationSql,
+                        new
+                        {
+                            UserId = userId.Value,
+                            Body = $"Tu reserva {bookingCode} fue creada correctamente y está pendiente de confirmación.",
+                            ActionUrl = $"/client/profile/bookings/{bookingCode}"
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                await transaction.CommitAsync(cancellationToken);
+
+                return Ok(new
+                {
+                    data = created,
+                    message = "Booking created successfully."
+                });
+            }
+            catch (PostgresException ex) when (ex.SqlState == "23505")
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                return Conflict(new
+                {
+                    error = new
+                    {
+                        code = "DUPLICATE_BOOKING_CODE",
+                        message = "A booking with the generated code already exists. Please try again."
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                Console.WriteLine("CREATE BOOKING DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "CREATE_BOOKING_DATABASE_ERROR",
+                        message = ex.Message
+                    }
+                });
+            }
         }
-        catch (PostgresException ex) when (ex.SqlState == "23505")
+        catch (Exception ex)
         {
-            return Conflict(new
+            Console.WriteLine("CREATE BOOKING ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "DUPLICATE_BOOKING_CODE",
-                    message = "A booking with the generated code already exists. Please try again."
+                    code = "CREATE_BOOKING_ERROR",
+                    message = ex.Message
                 }
             });
         }

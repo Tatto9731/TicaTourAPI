@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Security.Claims;
+using TicaTourAPI.Data;
 
 namespace TicaTourAPI.Controllers;
 
@@ -11,18 +12,19 @@ namespace TicaTourAPI.Controllers;
 [Route("api/Me/Bookings")]
 public class MeBookingsController : ControllerBase
 {
-    private readonly NpgsqlConnection _connection;
+    private readonly IDbConnectionFactory _connectionFactory;
 
-    public MeBookingsController(NpgsqlConnection connection)
+    public MeBookingsController(IDbConnectionFactory connectionFactory)
     {
-        _connection = connection;
+        _connectionFactory = connectionFactory;
     }
 
     [HttpGet]
     public async Task<IActionResult> GetMyBookings(
         [FromQuery] string status = "all",
         [FromQuery] int page = 1,
-        [FromQuery] int perPage = 20)
+        [FromQuery] int perPage = 20,
+        CancellationToken cancellationToken = default)
     {
         var userId = GetUserId();
 
@@ -51,7 +53,7 @@ public class MeBookingsController : ControllerBase
                 b.guests_adults,
                 b.guests_children,
                 (b.guests_adults + b.guests_children) as guests,
-                b.booking_date,
+                b.booking_date::text as booking_date,
                 b.slot_label,
                 b.total_amount,
                 b.currency,
@@ -88,50 +90,82 @@ public class MeBookingsController : ControllerBase
             Offset = offset
         };
 
-        var bookings = await _connection.QueryAsync(sql, parameters);
-        var total = await _connection.ExecuteScalarAsync<int>(countSql, parameters);
-
-        return Ok(new
+        try
         {
-            data = bookings.Select(b => new
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+
+            var bookings = await connection.QueryAsync(
+                new CommandDefinition(
+                    sql,
+                    parameters,
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            var total = await connection.ExecuteScalarAsync<int>(
+                new CommandDefinition(
+                    countSql,
+                    parameters,
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            return Ok(new
             {
-                bookingCode = (string)b.booking_code,
-                status = (string)b.status,
-                guestsAdults = (int)b.guests_adults,
-                guestsChildren = (int)b.guests_children,
-                guests = (int)b.guests,
-                bookingDate = b.booking_date,
-                slotLabel = (string)b.slot_label,
-                totalAmount = (decimal)b.total_amount,
-                currency = (string)b.currency,
-                meetingPoint = (string?)b.meeting_point,
-                createdAt = b.created_at,
-                experience = new
+                data = bookings.Select(b => new
                 {
-                    publicCode = (string)b.experience_public_code,
-                    slug = (string)b.experience_slug,
-                    title = (string)b.experience_title,
-                    image = (string?)b.experience_image
+                    bookingCode = (string)b.booking_code,
+                    status = (string)b.status,
+                    guestsAdults = (int)b.guests_adults,
+                    guestsChildren = (int)b.guests_children,
+                    guests = (int)b.guests,
+                    bookingDate = (string?)b.booking_date,
+                    slotLabel = (string)b.slot_label,
+                    totalAmount = (decimal)b.total_amount,
+                    currency = (string)b.currency,
+                    meetingPoint = (string?)b.meeting_point,
+                    createdAt = b.created_at,
+                    experience = new
+                    {
+                        publicCode = (string)b.experience_public_code,
+                        slug = (string)b.experience_slug,
+                        title = (string)b.experience_title,
+                        image = (string?)b.experience_image
+                    },
+                    company = new
+                    {
+                        name = (string)b.company_name,
+                        slug = (string)b.company_slug
+                    }
+                }),
+                meta = new
+                {
+                    page,
+                    perPage,
+                    total,
+                    totalPages = (int)Math.Ceiling(total / (double)perPage)
                 },
-                company = new
-                {
-                    name = (string)b.company_name,
-                    slug = (string)b.company_slug
-                }
-            }),
-            meta = new
+                message = "OK"
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GET MY BOOKINGS ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
-                page,
-                perPage,
-                total,
-                totalPages = (int)Math.Ceiling(total / (double)perPage)
-            },
-            message = "OK"
-        });
+                error = new
+                {
+                    code = "GET_MY_BOOKINGS_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
     }
 
     [HttpGet("{bookingCode}")]
-    public async Task<IActionResult> GetMyBookingDetail([FromRoute] string bookingCode)
+    public async Task<IActionResult> GetMyBookingDetail(
+        [FromRoute] string bookingCode,
+        CancellationToken cancellationToken)
     {
         var userId = GetUserId();
 
@@ -147,7 +181,7 @@ public class MeBookingsController : ControllerBase
                 b.guests_adults,
                 b.guests_children,
                 (b.guests_adults + b.guests_children) as guests,
-                b.booking_date,
+                b.booking_date::text as booking_date,
                 b.slot_label,
                 b.total_amount,
                 b.currency,
@@ -176,65 +210,91 @@ public class MeBookingsController : ControllerBase
             limit 1;
         """;
 
-        var booking = await _connection.QueryFirstOrDefaultAsync(sql, new
+        try
         {
-            UserId = userId.Value,
-            BookingCode = bookingCode
-        });
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
 
-        if (booking is null)
+            var booking = await connection.QueryFirstOrDefaultAsync(
+                new CommandDefinition(
+                    sql,
+                    new
+                    {
+                        UserId = userId.Value,
+                        BookingCode = bookingCode
+                    },
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            if (booking is null)
+            {
+                return NotFound(new
+                {
+                    error = new
+                    {
+                        code = "BOOKING_NOT_FOUND",
+                        message = "Booking was not found."
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = new
+                {
+                    bookingCode = (string)booking.booking_code,
+                    status = (string)booking.status,
+                    guestsAdults = (int)booking.guests_adults,
+                    guestsChildren = (int)booking.guests_children,
+                    guests = (int)booking.guests,
+                    bookingDate = (string?)booking.booking_date,
+                    slotLabel = (string)booking.slot_label,
+                    totalAmount = (decimal)booking.total_amount,
+                    currency = (string)booking.currency,
+                    meetingPoint = (string?)booking.meeting_point,
+                    cancellationPolicy = (string)booking.cancellation_policy,
+                    notes = (string?)booking.notes,
+                    createdAt = booking.created_at,
+                    experience = new
+                    {
+                        publicCode = (string)booking.experience_public_code,
+                        slug = (string)booking.experience_slug,
+                        title = (string)booking.experience_title,
+                        image = (string?)booking.experience_image,
+                        province = (string)booking.experience_province,
+                        zone = (string)booking.experience_zone
+                    },
+                    company = new
+                    {
+                        name = (string)booking.company_name,
+                        slug = (string)booking.company_slug,
+                        phone = (string?)booking.company_phone,
+                        whatsapp = (string?)booking.company_whatsapp,
+                        email = (string)booking.company_email
+                    }
+                },
+                message = "OK"
+            });
+        }
+        catch (Exception ex)
         {
-            return NotFound(new
+            Console.WriteLine("GET MY BOOKING DETAIL ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "BOOKING_NOT_FOUND",
-                    message = "Booking was not found."
+                    code = "GET_MY_BOOKING_DETAIL_ERROR",
+                    message = ex.Message
                 }
             });
         }
-
-        return Ok(new
-        {
-            data = new
-            {
-                bookingCode = (string)booking.booking_code,
-                status = (string)booking.status,
-                guestsAdults = (int)booking.guests_adults,
-                guestsChildren = (int)booking.guests_children,
-                guests = (int)booking.guests,
-                bookingDate = booking.booking_date,
-                slotLabel = (string)booking.slot_label,
-                totalAmount = (decimal)booking.total_amount,
-                currency = (string)booking.currency,
-                meetingPoint = (string?)booking.meeting_point,
-                cancellationPolicy = (string)booking.cancellation_policy,
-                notes = (string?)booking.notes,
-                createdAt = booking.created_at,
-                experience = new
-                {
-                    publicCode = (string)booking.experience_public_code,
-                    slug = (string)booking.experience_slug,
-                    title = (string)booking.experience_title,
-                    image = (string?)booking.experience_image,
-                    province = (string)booking.experience_province,
-                    zone = (string)booking.experience_zone
-                },
-                company = new
-                {
-                    name = (string)booking.company_name,
-                    slug = (string)booking.company_slug,
-                    phone = (string?)booking.company_phone,
-                    whatsapp = (string?)booking.company_whatsapp,
-                    email = (string)booking.company_email
-                }
-            },
-            message = "OK"
-        });
     }
 
     [HttpPatch("{bookingCode}/cancel")]
-    public async Task<IActionResult> CancelMyBooking([FromRoute] string bookingCode)
+    public async Task<IActionResult> CancelMyBooking(
+        [FromRoute] string bookingCode,
+        CancellationToken cancellationToken)
     {
         var userId = GetUserId();
 
@@ -254,29 +314,53 @@ public class MeBookingsController : ControllerBase
             returning booking_code, status, updated_at;
         """;
 
-        var cancelled = await _connection.QueryFirstOrDefaultAsync(sql, new
+        try
         {
-            UserId = userId.Value,
-            BookingCode = bookingCode
-        });
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
 
-        if (cancelled is null)
+            var cancelled = await connection.QueryFirstOrDefaultAsync(
+                new CommandDefinition(
+                    sql,
+                    new
+                    {
+                        UserId = userId.Value,
+                        BookingCode = bookingCode
+                    },
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
+
+            if (cancelled is null)
+            {
+                return BadRequest(new
+                {
+                    error = new
+                    {
+                        code = "BOOKING_CANNOT_BE_CANCELLED",
+                        message = "Booking was not found or cannot be cancelled."
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = cancelled,
+                message = "Booking cancelled successfully."
+            });
+        }
+        catch (Exception ex)
         {
-            return BadRequest(new
+            Console.WriteLine("CANCEL MY BOOKING ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
             {
                 error = new
                 {
-                    code = "BOOKING_CANNOT_BE_CANCELLED",
-                    message = "Booking was not found or cannot be cancelled."
+                    code = "CANCEL_MY_BOOKING_ERROR",
+                    message = ex.Message
                 }
             });
         }
-
-        return Ok(new
-        {
-            data = cancelled,
-            message = "Booking cancelled successfully."
-        });
     }
 
     private Guid? GetUserId()
