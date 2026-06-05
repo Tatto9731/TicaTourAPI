@@ -77,7 +77,7 @@ public class ProfileController : ControllerBase
                     p.profile_completion as ProfileCompletion,
                     p.is_identity_verified as IsIdentityVerified,
                     p.id_number as IdNumber,
-                    p.birth_date as BirthDate,
+                    p.birth_date::text as BirthDate,
                     p.created_at as CreatedAt,
                     p.updated_at as UpdatedAt,
 
@@ -349,7 +349,7 @@ public class ProfileController : ControllerBase
         public bool IsIdentityVerified { get; set; }
 
         public string? IdNumber { get; set; }
-        public DateTime? BirthDate { get; set; }
+        public string? BirthDate { get; set; }
 
         public string PreferencesJson { get; set; } = "[]";
         public bool? RequiresTransport { get; set; }
