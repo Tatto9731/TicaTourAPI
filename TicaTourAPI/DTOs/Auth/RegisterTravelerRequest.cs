@@ -9,6 +9,7 @@ public sealed class RegisterTravelerRequest
 
     public string PreferredLanguage { get; set; } = "es";
     public string PreferredCurrency { get; set; } = "CRC";
+    public bool DarkMode { get; set; } = false;
 
     public string? IdNumber { get; set; }
     public DateTime? BirthDate { get; set; }

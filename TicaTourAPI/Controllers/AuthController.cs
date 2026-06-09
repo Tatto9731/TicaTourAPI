@@ -188,6 +188,7 @@ public class AuthController : ControllerBase
                     birth_date,
                     preferred_language,
                     preferred_currency,
+                    dark_mode,
                     profile_completion,
                     created_at,
                     updated_at
@@ -201,10 +202,23 @@ public class AuthController : ControllerBase
                     @BirthDate,
                     @PreferredLanguage,
                     @PreferredCurrency,
+                    @DarkMode,
                     @ProfileCompletion,
                     now(),
                     now()
-                );
+                )
+                on conflict (id) do update
+                set
+                    full_name = excluded.full_name,
+                    role = excluded.role,
+                    phone = excluded.phone,
+                    id_number = excluded.id_number,
+                    birth_date = excluded.birth_date,
+                    preferred_language = excluded.preferred_language,
+                    preferred_currency = excluded.preferred_currency,
+                    dark_mode = excluded.dark_mode,
+                    profile_completion = excluded.profile_completion,
+                    updated_at = now();
             """;
 
                 const string insertTravelerProfileSql = """
@@ -229,11 +243,16 @@ public class AuthController : ControllerBase
                     false,
                     now(),
                     now()
-                );
+                )
+                on conflict (user_id) do update
+                set
+                    travel_interests = excluded.travel_interests,
+                    preferences = excluded.preferences,
+                    requires_transport = excluded.requires_transport,
+                    updated_at = now();
             """;
 
                 var profileCompletion = CalculateTravelerProfileCompletion(request);
-
                 var preferencesJson = JsonSerializer.Serialize(request.Preferences ?? []);
 
                 await connection.ExecuteAsync(insertProfileSql, new
@@ -245,6 +264,7 @@ public class AuthController : ControllerBase
                     BirthDate = request.BirthDate?.Date,
                     request.PreferredLanguage,
                     request.PreferredCurrency,
+                    request.DarkMode,
                     ProfileCompletion = profileCompletion
                 }, transaction);
 
@@ -335,7 +355,8 @@ public class AuthController : ControllerBase
                 {
                     email = request.Email,
                     name = request.FullName,
-                    role = "traveler"
+                    role = "traveler",
+                    darkMode = request.DarkMode
                 }
             },
             message = "OK"
