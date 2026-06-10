@@ -29,6 +29,185 @@ public class AuthController : ControllerBase
         _configuration = configuration;
     }
 
+    [Authorize]
+    [HttpPost("sync-social-traveler")]
+    public async Task<IActionResult> SyncSocialTraveler(CancellationToken cancellationToken)
+    {
+        var userId = GetUserId();
+
+        if (userId is null)
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "UNAUTHORIZED",
+                    message = "User ID was not found in the token."
+                }
+            });
+        }
+
+        var email = GetEmailFromToken();
+        var fullName = GetNameFromToken() ?? email ?? "Traveler";
+        var avatarUrl = GetAvatarUrlFromToken();
+
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "EMAIL_NOT_FOUND",
+                    message = "Email was not found in the token."
+                }
+            });
+        }
+
+        try
+        {
+            await using var connection = await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            try
+            {
+                const string upsertProfileSql = """
+                insert into public.profiles (
+                    id,
+                    full_name,
+                    role,
+                    phone,
+                    avatar_url,
+                    preferred_language,
+                    preferred_currency,
+                    dark_mode,
+                    profile_completion,
+                    is_identity_verified,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @Id,
+                    @FullName,
+                    'traveler',
+                    null,
+                    @AvatarUrl,
+                    'es',
+                    'CRC',
+                    false,
+                    30,
+                    false,
+                    now(),
+                    now()
+                )
+                on conflict (id) do update
+                set
+                    full_name = coalesce(public.profiles.full_name, excluded.full_name),
+                    avatar_url = coalesce(public.profiles.avatar_url, excluded.avatar_url),
+                    preferred_language = coalesce(public.profiles.preferred_language, excluded.preferred_language),
+                    preferred_currency = coalesce(public.profiles.preferred_currency, excluded.preferred_currency),
+                    updated_at = now();
+            """;
+
+                const string upsertTravelerProfileSql = """
+                insert into public.traveler_profiles (
+                    user_id,
+                    travel_interests,
+                    preferences,
+                    requires_transport,
+                    notification_settings,
+                    search_settings,
+                    location_recommendations_enabled,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @UserId,
+                    '[]'::jsonb,
+                    '[]'::jsonb,
+                    null,
+                    '{}'::jsonb,
+                    '{}'::jsonb,
+                    false,
+                    now(),
+                    now()
+                )
+                on conflict (user_id) do nothing;
+            """;
+
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        upsertProfileSql,
+                        new
+                        {
+                            Id = userId.Value,
+                            FullName = fullName,
+                            AvatarUrl = avatarUrl
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                await connection.ExecuteAsync(
+                    new CommandDefinition(
+                        upsertTravelerProfileSql,
+                        new
+                        {
+                            UserId = userId.Value
+                        },
+                        transaction,
+                        commandTimeout: 30,
+                        cancellationToken: cancellationToken));
+
+                await transaction.CommitAsync(cancellationToken);
+
+                return Ok(new
+                {
+                    data = new
+                    {
+                        email,
+                        profile = new
+                        {
+                            fullName,
+                            role = "traveler",
+                            avatarUrl
+                        }
+                    },
+                    message = "Social traveler synced successfully."
+                });
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+
+                Console.WriteLine("SYNC SOCIAL TRAVELER DATABASE ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = new
+                    {
+                        code = "SYNC_SOCIAL_TRAVELER_DATABASE_ERROR",
+                        message = ex.Message
+                    }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("SYNC SOCIAL TRAVELER CONNECTION ERROR:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "SYNC_SOCIAL_TRAVELER_CONNECTION_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
+    }
+
     [HttpPost("register-traveler")]
     public async Task<IActionResult> RegisterTraveler([FromBody] RegisterTravelerRequest request)
     {
@@ -1069,6 +1248,49 @@ public class AuthController : ControllerBase
                ?? User.FindFirstValue("email");
     }
 
+    private string? GetAvatarUrlFromToken()
+    {
+        return User.FindFirstValue("avatar_url")
+               ?? User.FindFirstValue("picture")
+               ?? GetUserMetadataValue("avatar_url")
+               ?? GetUserMetadataValue("picture");
+    }
+
+    private string? GetUserMetadataValue(string key)
+    {
+        var metadataJson =
+            User.FindFirstValue("user_metadata")
+            ?? User.FindFirstValue("raw_user_meta_data");
+
+        if (string.IsNullOrWhiteSpace(metadataJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (!document.RootElement.TryGetProperty(key, out var value))
+            {
+                return null;
+            }
+
+            return value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : value.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private string? GetNameFromToken()
     {
         return User.FindFirstValue(ClaimTypes.Name)
@@ -1446,4 +1668,6 @@ public class AuthController : ControllerBase
             };
         }
     }
+
+
 }
