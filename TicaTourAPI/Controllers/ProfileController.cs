@@ -81,6 +81,26 @@ public class ProfileController : ControllerBase
                     p.created_at as CreatedAt,
                     p.updated_at as UpdatedAt,
 
+                    (
+                        select count(*)::integer
+                        from public.bookings b
+                        where b.user_id = p.id
+                          and b.status = 'Completed'
+                    ) as CompletedExperiences,
+
+                    (
+                        select count(*)::integer
+                        from public.bookings b
+                        where b.user_id = p.id
+                          and b.status = 'Pending'
+                    ) as PendingBookings,
+
+                    (
+                        select count(*)::integer
+                        from public.reviews r
+                        where r.user_id = p.id
+                    ) as TotalReviews,
+
                     coalesce(tp.preferences, '[]'::jsonb)::text as PreferencesJson,
                     tp.requires_transport as RequiresTransport,
 
@@ -196,6 +216,12 @@ public class ProfileController : ControllerBase
 
                         createdAt = row.CreatedAt,
                         updatedAt = row.UpdatedAt
+                    },
+                    stats = new
+                    {
+                        completedExperiences = row.CompletedExperiences,
+                        pendingBookings = row.PendingBookings,
+                        totalReviews = row.TotalReviews
                     },
                     companies
                 },
@@ -353,6 +379,10 @@ public class ProfileController : ControllerBase
 
         public string PreferencesJson { get; set; } = "[]";
         public bool? RequiresTransport { get; set; }
+
+        public int CompletedExperiences { get; set; }
+        public int PendingBookings { get; set; }
+        public int TotalReviews { get; set; }
 
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
