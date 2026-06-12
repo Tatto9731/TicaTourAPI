@@ -1,5 +1,6 @@
 ﻿using Dapper;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity.Data;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Net.Http.Headers;
@@ -1617,6 +1618,130 @@ public class AuthController : ControllerBase
         }
 
         return LoginResult.Ok(accessToken, refreshToken);
+    }
+
+    [AllowAnonymous]
+    [HttpPost("forgot-password")]
+    public async Task<IActionResult> ForgotPassword(
+    [FromBody] DTOs.Auth.ForgotPasswordRequest request,
+    CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Email))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "VALIDATION_ERROR",
+                    message = "Email is required."
+                }
+            });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.RedirectTo))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "VALIDATION_ERROR",
+                    message = "RedirectTo is required."
+                }
+            });
+        }
+
+        var allowedRedirects = new[]
+        {
+        "http://localhost:5173/reset-password",
+        "http://localhost:3000/reset-password",
+        "https://tu-frontend.onrender.com/reset-password"
+    };
+
+        if (!allowedRedirects.Contains(request.RedirectTo))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "INVALID_REDIRECT_URL",
+                    message = "Redirect URL is not allowed."
+                }
+            });
+        }
+
+        var projectUrl = _configuration["Supabase:ProjectUrl"];
+        var anonKey = _configuration["Supabase:AnonKey"];
+
+        if (string.IsNullOrWhiteSpace(projectUrl) || string.IsNullOrWhiteSpace(anonKey))
+        {
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "SUPABASE_CONFIG_MISSING",
+                    message = "Supabase configuration is missing."
+                }
+            });
+        }
+
+        try
+        {
+            using var httpRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"{projectUrl.TrimEnd('/')}/auth/v1/recover");
+
+            httpRequest.Headers.Add("apikey", anonKey);
+
+            httpRequest.Content = JsonContent.Create(new
+            {
+                email = request.Email.Trim(),
+                redirect_to = request.RedirectTo
+            });
+
+            var httpClient = _httpClientFactory.CreateClient();
+
+            var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine("FORGOT PASSWORD ERROR:");
+                Console.WriteLine(responseBody);
+
+                return StatusCode((int)response.StatusCode, new
+                {
+                    error = new
+                    {
+                        code = "PASSWORD_RECOVERY_FAILED",
+                        message = "Password recovery email could not be sent.",
+                        details = responseBody
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = new
+                {
+                    email = request.Email.Trim()
+                },
+                message = "Password recovery email sent successfully."
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("FORGOT PASSWORD EXCEPTION:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "PASSWORD_RECOVERY_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
     }
 
     private sealed class CreateAuthUserResult
