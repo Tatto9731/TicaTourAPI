@@ -1652,7 +1652,8 @@ public class AuthController : ControllerBase
 
         var allowedRedirects = new[]
         {
-        "https://crisfx5045.github.io/demo-travel-system/reset-password"
+        "https://crisfx5045.github.io/demo-travel-system/reset-password",
+        "http://localhost:5097/reset-password"
     };
 
         if (!allowedRedirects.Contains(request.RedirectTo))
