@@ -90,10 +90,9 @@ public class ProfileController : ControllerBase
 
                     (
                         select count(*)::integer
-                        from public.bookings b
-                        where b.user_id = p.id
-                          and b.status = 'Pending'
-                    ) as PendingBookings,
+                        from public.favorites f
+                        where f.user_id = p.id
+                    ) as FavoriteExperiences,
 
                     (
                         select count(*)::integer
@@ -152,18 +151,16 @@ public class ProfileController : ControllerBase
             """;
 
             Console.WriteLine($"[PROFILE:{requestId}] STEP 2 - Creating command. UserId={userId.Value}");
-
-            var command = new CommandDefinition(
-                sql,
-                new { UserId = userId.Value },
-                commandTimeout: 30,
-                cancellationToken: cancellationToken);
-
             Console.WriteLine($"[PROFILE:{requestId}] STEP 3 - Executing profile query...");
 
             var queryWatch = Stopwatch.StartNew();
 
-            var row = await connection.QueryFirstOrDefaultAsync<ProfileMeRow>(command);
+            var row = await connection.QueryFirstOrDefaultAsync<ProfileMeRow>(
+                new CommandDefinition(
+                    sql,
+                    new { UserId = userId.Value },
+                    commandTimeout: 30,
+                    cancellationToken: cancellationToken));
 
             queryWatch.Stop();
 
@@ -220,7 +217,7 @@ public class ProfileController : ControllerBase
                     stats = new
                     {
                         completedExperiences = row.CompletedExperiences,
-                        pendingBookings = row.PendingBookings,
+                        favoriteExperiences = row.FavoriteExperiences,
                         totalReviews = row.TotalReviews
                     },
                     companies
@@ -381,7 +378,7 @@ public class ProfileController : ControllerBase
         public bool? RequiresTransport { get; set; }
 
         public int CompletedExperiences { get; set; }
-        public int PendingBookings { get; set; }
+        public int FavoriteExperiences { get; set; }
         public int TotalReviews { get; set; }
 
         public DateTime CreatedAt { get; set; }
