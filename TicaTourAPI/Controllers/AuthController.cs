@@ -1652,9 +1652,7 @@ public class AuthController : ControllerBase
 
         var allowedRedirects = new[]
         {
-        "http://localhost:5173/reset-password",
-        "http://localhost:3000/reset-password",
-        "https://tu-frontend.onrender.com/reset-password"
+        "https://crisfx5045.github.io/demo-travel-system/reset-password"
     };
 
         if (!allowedRedirects.Contains(request.RedirectTo))
