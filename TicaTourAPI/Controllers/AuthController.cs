@@ -1686,15 +1686,14 @@ public class AuthController : ControllerBase
         try
         {
             using var httpRequest = new HttpRequestMessage(
-            HttpMethod.Post,
-            $"{projectUrl.TrimEnd('/')}/auth/v1/recover");
-
+                HttpMethod.Post,
+                $"{projectUrl.TrimEnd('/')}/auth/v1/recover?redirect_to={Uri.EscapeDataString(request.RedirectTo)}");
+            
             httpRequest.Headers.Add("apikey", anonKey);
-
+            
             httpRequest.Content = JsonContent.Create(new
             {
-                email = request.Email.Trim(),
-                redirect_to = request.RedirectTo
+                email = request.Email.Trim()
             });
 
             var httpClient = _httpClientFactory.CreateClient();
