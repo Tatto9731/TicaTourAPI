@@ -1683,61 +1683,64 @@ public class AuthController : ControllerBase
             });
         }
 
-       try
-{
-    var payload = new
-    {
-        email = request.Email.Trim(),
-        redirect_to = request.RedirectTo
-    };
-
-    var json = JsonSerializer.Serialize(payload);
-
-    using var httpRequest = new HttpRequestMessage(
-        HttpMethod.Post,
-        $"{projectUrl.TrimEnd('/')}/auth/v1/recover");
-
-    httpRequest.Headers.Add("apikey", anonKey);
-
-    httpRequest.Content = new StringContent(
-        json,
-        Encoding.UTF8,
-        "application/json");
-
-    var httpClient = _httpClientFactory.CreateClient();
-
-    var response = await httpClient.SendAsync(httpRequest, cancellationToken);
-    var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
-
-    return Ok(new
-    {
-        request = new
+        try
         {
-            url = httpRequest.RequestUri?.ToString(),
-            body = json,
-            redirectTo = request.RedirectTo
-        },
-        supabase = new
-        {
-            statusCode = (int)response.StatusCode,
-            responseBody
+            using var httpRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"{projectUrl.TrimEnd('/')}/auth/v1/recover");
+
+            httpRequest.Headers.Add("apikey", anonKey);
+
+            httpRequest.Content = JsonContent.Create(new
+            {
+                email = request.Email.Trim(),
+                redirect_to = request.RedirectTo
+            });
+
+            var httpClient = _httpClientFactory.CreateClient();
+
+            var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine("FORGOT PASSWORD ERROR:");
+                Console.WriteLine(responseBody);
+
+                return StatusCode((int)response.StatusCode, new
+                {
+                    error = new
+                    {
+                        code = "PASSWORD_RECOVERY_FAILED",
+                        message = "Password recovery email could not be sent.",
+                        details = responseBody
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = new
+                {
+                    email = request.Email.Trim()
+                },
+                message = "Password recovery email sent successfully."
+            });
         }
-    });
-}
-catch (Exception ex)
-{
-    Console.WriteLine("FORGOT PASSWORD EXCEPTION:");
-    Console.WriteLine(ex.ToString());
-
-    return StatusCode(500, new
-    {
-        error = new
+        catch (Exception ex)
         {
-            code = "PASSWORD_RECOVERY_ERROR",
-            message = ex.Message
+            Console.WriteLine("FORGOT PASSWORD EXCEPTION:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "PASSWORD_RECOVERY_ERROR",
+                    message = ex.Message
+                }
+            });
         }
-    });
-}
     }
 
     private sealed class CreateAuthUserResult
