@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using TicaTourAPI.Data;
 using TicaTourAPI.DTOs.Auth;
+using ResetPasswordRequest = TicaTourAPI.DTOs.Auth.ResetPasswordRequest;
 
 namespace TicaTourAPI.Controllers;
 
@@ -1736,6 +1737,149 @@ public class AuthController : ControllerBase
                 error = new
                 {
                     code = "PASSWORD_RECOVERY_ERROR",
+                    message = ex.Message
+                }
+            });
+        }
+    }
+
+    [Authorize]
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword(
+    [FromBody] ResetPasswordRequest request,
+    CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.NewPassword))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "VALIDATION_ERROR",
+                    message = "NewPassword is required."
+                }
+            });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ConfirmPassword))
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "VALIDATION_ERROR",
+                    message = "ConfirmPassword is required."
+                }
+            });
+        }
+
+        if (request.NewPassword.Length < 8)
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "VALIDATION_ERROR",
+                    message = "Password must have at least 8 characters."
+                }
+            });
+        }
+
+        if (request.NewPassword != request.ConfirmPassword)
+        {
+            return BadRequest(new
+            {
+                error = new
+                {
+                    code = "PASSWORDS_DO_NOT_MATCH",
+                    message = "NewPassword and ConfirmPassword do not match."
+                }
+            });
+        }
+
+        var accessToken = GetBearerToken();
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return Unauthorized(new
+            {
+                error = new
+                {
+                    code = "TOKEN_NOT_FOUND",
+                    message = "Bearer token was not found."
+                }
+            });
+        }
+
+        var projectUrl = _configuration["Supabase:ProjectUrl"];
+        var anonKey = _configuration["Supabase:AnonKey"];
+
+        if (string.IsNullOrWhiteSpace(projectUrl) || string.IsNullOrWhiteSpace(anonKey))
+        {
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "SUPABASE_CONFIG_MISSING",
+                    message = "Supabase ProjectUrl or AnonKey is missing."
+                }
+            });
+        }
+
+        try
+        {
+            var httpClient = _httpClientFactory.CreateClient();
+
+            using var httpRequest = new HttpRequestMessage(
+                HttpMethod.Put,
+                $"{projectUrl.TrimEnd('/')}/auth/v1/user");
+
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Headers.Add("apikey", anonKey);
+
+            httpRequest.Content = JsonContent.Create(new
+            {
+                password = request.NewPassword
+            });
+
+            var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine("RESET PASSWORD ERROR:");
+                Console.WriteLine(responseBody);
+
+                return StatusCode((int)response.StatusCode, new
+                {
+                    error = new
+                    {
+                        code = "RESET_PASSWORD_FAILED",
+                        message = "Password could not be updated.",
+                        details = responseBody
+                    }
+                });
+            }
+
+            return Ok(new
+            {
+                data = new
+                {
+                    passwordUpdated = true
+                },
+                message = "Password updated successfully."
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("RESET PASSWORD EXCEPTION:");
+            Console.WriteLine(ex.ToString());
+
+            return StatusCode(500, new
+            {
+                error = new
+                {
+                    code = "RESET_PASSWORD_ERROR",
                     message = ex.Message
                 }
             });
